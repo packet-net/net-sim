@@ -16,6 +16,9 @@
 # a rise in level at the start of a burst and open-squelch audio falls
 # instead (the hiss is louder than the signal). Remove the squelch to see
 # that. The afsk1200 pair runs open squelch, as packet stations usually do.
+#
+# pdn's frequency matching (on by default) can still cost the odd frame
+# after a station has heard three from the other; see docs/fm-channel.md.
 
 nodes:
   - id: a
