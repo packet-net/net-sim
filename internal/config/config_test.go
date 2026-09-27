@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -130,9 +131,6 @@ nodes:
 
 func TestValidConfig(t *testing.T) {
 	yaml := `
-mixer_mode: fm_capture
-capture_db: 6.0
-collision_mode: silence
 nodes:
   - id: rdg
     ports:
@@ -147,17 +145,14 @@ nodes:
 links:
   - from: rdg.vhf
     to:   bsg.vhf
-    loss_db: 0
+    path_loss_db: 120
   - from: bsg.vhf
     to:   rdg.vhf
-    loss_db: 0
+    path_loss_db: 120
 `
 	cfg, err := Parse(strings.NewReader(yaml))
 	if err != nil {
 		t.Fatalf("expected ok, got %v", err)
-	}
-	if cfg.CaptureDB != 6.0 {
-		t.Errorf("capture_db = %g, want 6.0", cfg.CaptureDB)
 	}
 	if len(cfg.Links) != 2 {
 		t.Errorf("links = %d, want 2", len(cfg.Links))
@@ -222,55 +217,6 @@ links: []
 	}
 }
 
-func TestSquelchOpenMSAccepted(t *testing.T) {
-	yaml := `
-nodes:
-  - id: a
-    ports:
-      - id: vhf
-        modem: { mode: afsk1200 }
-        kiss_port: 8001
-  - id: b
-    ports:
-      - id: vhf
-        modem: { mode: afsk1200 }
-        kiss_port: 8002
-links:
-  - { from: a.vhf, to: b.vhf, loss_db: 0, squelch_open_ms: 50 }
-`
-	cfg, err := Parse(strings.NewReader(yaml))
-	if err != nil {
-		t.Fatalf("expected ok, got %v", err)
-	}
-	if cfg.Links[0].SquelchOpenMS != 50 {
-		t.Errorf("squelch_open_ms = %g, want 50", cfg.Links[0].SquelchOpenMS)
-	}
-}
-
-func TestSquelchOpenMSRange(t *testing.T) {
-	for _, v := range []string{"-1", "501"} {
-		yaml := `
-nodes:
-  - id: a
-    ports:
-      - id: vhf
-        modem: { mode: afsk1200 }
-        kiss_port: 8001
-  - id: b
-    ports:
-      - id: vhf
-        modem: { mode: afsk1200 }
-        kiss_port: 8002
-links:
-  - { from: a.vhf, to: b.vhf, loss_db: 0, squelch_open_ms: ` + v + ` }
-`
-		_, err := Parse(strings.NewReader(yaml))
-		if err == nil || !strings.Contains(err.Error(), "squelch_open_ms") {
-			t.Fatalf("squelch_open_ms=%s: expected range error, got %v", v, err)
-		}
-	}
-}
-
 func TestSelfLoopRejected(t *testing.T) {
 	yaml := `
 nodes:
@@ -319,7 +265,7 @@ nodes:
     ports:
       - { id: fm, tnc: ` + tnc + `, modem: { mode: ` + mode + ` }, kiss_port: 8002 }
 links:
-  - { from: a.fm, to: b.fm, loss_db: 0 }
+  - { from: a.fm, to: b.fm, path_loss_db: 120 }
 `
 	}
 	for _, c := range []struct {
@@ -359,7 +305,7 @@ nodes:
     ports:
       - { id: fm, tnc: pdn, modem: { mode: c4fsk9600 }, kiss_port: 8002 }
 links:
-  - { from: a.fm, to: b.fm, loss_db: 0 }
+  - { from: a.fm, to: b.fm, path_loss_db: 120 }
 `
 	if _, err := Parse(strings.NewReader(yaml)); err == nil || !strings.Contains(err.Error(), "modem mismatch") {
 		t.Fatalf("want modem mismatch, got %v", err)
@@ -381,28 +327,6 @@ links: []
 	}
 }
 
-func TestCaptureDB(t *testing.T) {
-	base := `
-nodes:
-  - id: a
-    ports:
-      - { id: vhf, modem: { mode: afsk1200 }, kiss_port: 8001 }
-links: []
-`
-	for _, c := range []struct {
-		prefix string
-		want   float64
-	}{{"", 6}, {"capture_db: 0\n", 0}, {"capture_db: 3\n", 3}} {
-		cfg, err := Parse(strings.NewReader(c.prefix + base))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if cfg.CaptureDB != c.want {
-			t.Errorf("%q: capture_db = %g, want %g", c.prefix, cfg.CaptureDB, c.want)
-		}
-	}
-}
-
 func TestRejectsUnusableNumbers(t *testing.T) {
 	base := `
 nodes:
@@ -417,8 +341,8 @@ nodes:
 		"time_scale: 1e9\n",
 		"time_scale: .inf\n",
 		"time_scale: .nan\n",
-		"capture_db: .nan\n",
-		"links:\n  - { from: a.vhf, to: b.vhf, loss_db: .nan }\n",
+		"frequency_mhz: .nan\n",
+		"links:\n  - { from: a.vhf, to: b.vhf, path_loss_db: .nan }\n",
 	} {
 		yml := base
 		if strings.HasPrefix(bad, "links") {
@@ -428,6 +352,114 @@ nodes:
 		}
 		if _, err := Parse(strings.NewReader(yml)); err == nil {
 			t.Errorf("%q: accepted, want an error", strings.TrimSpace(bad))
+		}
+	}
+}
+
+func TestRetiredKeysAreRefused(t *testing.T) {
+	ports := `
+nodes:
+  - id: a
+    ports:
+      - { id: vhf, modem: { mode: afsk1200 }, kiss_port: 8001 PORTEXTRA }
+  - id: b
+    ports:
+      - { id: vhf, modem: { mode: afsk1200 }, kiss_port: 8002 }
+links:
+  - { from: a.vhf, to: b.vhf LINKEXTRA }
+`
+	for _, c := range []struct{ top, port, link, want string }{
+		{top: "mixer_mode: fm_capture\n", link: ", path_loss_db: 120", want: "mixer_mode is no longer used"},
+		{top: "capture_db: 6\n", link: ", path_loss_db: 120", want: "capture_db is no longer used"},
+		{top: "collision_mode: noise\n", link: ", path_loss_db: 120", want: "collision_mode is no longer used"},
+		{top: "default_noise_db: 40\n", link: ", path_loss_db: 120", want: "default_noise_db is no longer used"},
+		{port: ", noise_db: 40", link: ", path_loss_db: 120", want: "noise_db is no longer used"},
+		{link: ", loss_db: 10", want: "path_loss_db"},
+		{link: ", path_loss_db: 120, noise_db: 20", want: "noise_db is no longer used"},
+		{link: ", path_loss_db: 120, squelch_open_ms: 50", want: "squelch belongs to the receiving radio"},
+		{link: "", want: "path_loss_db is required"},
+	} {
+		yml := c.top + strings.Replace(strings.Replace(ports, " PORTEXTRA", c.port, 1), " LINKEXTRA", c.link, 1)
+		_, err := Parse(strings.NewReader(yml))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%q: want an error containing %q, got %v", strings.TrimSpace(c.top+c.port+c.link), c.want, err)
+		}
+	}
+}
+
+func TestRadioBlock(t *testing.T) {
+	yml := `
+frequency_mhz: 433
+nodes:
+  - id: a
+    ports:
+      - id: vhf
+        modem: { mode: afsk1200 }
+        kiss_port: 8001
+        radio:
+          channel: wide
+          path: voice
+          tx_power_w: 5
+          site_noise: rural
+          frequency_error_hz: 150
+          squelch: city
+  - id: b
+    ports:
+      - id: vhf
+        modem: { mode: afsk1200 }
+        kiss_port: 8002
+        radio: { squelch: { threshold_dbm: -110, hysteresis_db: 6, open_ms: 20 } }
+links:
+  - { from: a.vhf, to: b.vhf, path_loss_db: 130 }
+`
+	cfg, err := Parse(strings.NewReader(yml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.FrequencyMHz != 433 || *cfg.Links[0].PathLossDB != 130 {
+		t.Errorf("frequency %g, path loss %g", cfg.FrequencyMHz, *cfg.Links[0].PathLossDB)
+	}
+	a := cfg.Nodes[0].Ports[0].Radio.FM()
+	if a.Channel != "wide" || a.Path != "voice" || a.DeviationHz != 5000 || a.LimitHz != 5000 ||
+		a.AudioLowHz != 300 || a.EmphasisUs != 750 || a.FrequencyErrorHz != 150 {
+		t.Errorf("radio a: %+v", a)
+	}
+	if math.Abs(a.TxPowerDBm-36.99) > 0.01 {
+		t.Errorf("5 W is %g dBm, want 36.99", a.TxPowerDBm)
+	}
+	if a.Squelch.Open || a.Squelch.ThresholdDBm != -113 || a.Squelch.HysteresisDB != 8 {
+		t.Errorf("city squelch: %+v", a.Squelch)
+	}
+	b := cfg.Nodes[1].Ports[0].Radio.FM()
+	if b.Channel != "narrow" || b.Path != "data" || b.AudioHighHz != b.IFBandwidthHz/2 || b.LimitHz != 0 {
+		t.Errorf("default radio b: %+v", b)
+	}
+	if b.Squelch.ThresholdDBm != -110 || b.Squelch.HysteresisDB != 6 || b.Squelch.OpenMS != 20 {
+		t.Errorf("custom squelch: %+v", b.Squelch)
+	}
+}
+
+func TestRadioBlockRejectsNonsense(t *testing.T) {
+	for _, radio := range []string{
+		"{ channel: huge }",
+		"{ path: speaker }",
+		"{ site_noise: city }",
+		"{ squelch: loud }",
+		"{ squelch: { preset: city, threshold_dbm: -110 } }",
+		"{ deviation_hz: -1 }",
+		"{ rx_level_dbfs: 3 }",
+		"{ audio_low_hz: 3000, audio_high_hz: 300 }",
+		"{ bogus: 1 }",
+	} {
+		yml := `
+nodes:
+  - id: a
+    ports:
+      - { id: vhf, modem: { mode: afsk1200 }, kiss_port: 8001, radio: ` + radio + ` }
+links: []
+`
+		if _, err := Parse(strings.NewReader(yml)); err == nil {
+			t.Errorf("radio %s: accepted, want an error", radio)
 		}
 	}
 }

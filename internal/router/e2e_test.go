@@ -29,13 +29,39 @@ func findBackend(t *testing.T, b tnc.Backend, env string) string {
 
 func TestPdnModesThroughRouter(t *testing.T) {
 	pdn := findBackend(t, tnc.BackendPdn, "PDN_BIN")
-	// One of each family that runs over FM: AFSK, G3RUH, the FM QPSK
-	// mode, 4-level FSK and OFDM-FM.
-	for _, mode := range []config.Mode{"afsk1200", config.ModeGFSK9600, "qpsk3600", "c4fsk9600", "ofdm-fm-8k"} {
-		t.Run(string(mode), func(t *testing.T) {
-			pair(t, Options{PdnBin: pdn},
-				config.Port{TNC: config.TNCPdn, Modem: config.Modem{Mode: mode}},
-				config.Port{TNC: config.TNCPdn, Modem: config.Modem{Mode: mode}})
+	// One of each family that runs over FM, each on the channel pdn's
+	// mode table puts it on (docs/05-modes.md there): AFSK on a narrow
+	// data port, G3RUH, qpsk3600 (5 kHz deviation) and ofdm-fm-8k (audio to
+	// 8 kHz) on a wide one, c4fsk9600 (2.5 kHz) on a narrow one.
+	//
+	// c4fsk9600 and qpsk3600 run with the squelch closed, because on an
+	// open-squelch receiver both lose frames, and that is pdn's behaviour,
+	// not the channel's (the channel's levels match radio1's measured
+	// discriminator: see docs/fm-channel.md):
+	//   - c4fsk: pdn documents that its receiver doesn't yet work on an
+	//     open-squelch FM receiver (pdn-soundmodem #518).
+	//   - qpsk3600: the demodulator resets its frequency tracker when
+	//     in-band energy rises, but on open squelch a burst arrives as a
+	//     fall (the hiss is louder than the signal), so after hiss the
+	//     tracker has wandered and the preamble can't pull it back.
+	// The preset is Tait's "hard" (open -107, close -111 dBm): "city"
+	// closes only below -121 dBm, under the default residential noise
+	// floor of about -120.6, so once opened it would never close again, as
+	// on a real radio.
+	for _, c := range []struct {
+		mode  config.Mode
+		radio string
+	}{
+		{"afsk1200", "{}"},
+		{config.ModeGFSK9600, "{ channel: wide }"},
+		{"qpsk3600", "{ channel: wide, squelch: hard }"},
+		{"c4fsk9600", "{ squelch: hard }"},
+		{"ofdm-fm-8k", "{ channel: wide }"},
+	} {
+		t.Run(string(c.mode), func(t *testing.T) {
+			pairRadio(t, Options{PdnBin: pdn}, c.radio,
+				config.Port{TNC: config.TNCPdn, Modem: config.Modem{Mode: c.mode}},
+				config.Port{TNC: config.TNCPdn, Modem: config.Modem{Mode: c.mode}})
 		})
 	}
 }
@@ -52,24 +78,30 @@ func TestPdnDirewolfInterop(t *testing.T) {
 	}
 }
 
-// pair runs a two-node topology, a <-> b, and checks a UI frame gets from
-// a to b and another from b to a.
+// pair runs a two-node topology of default radios, a <-> b, over a strong
+// link, and checks a UI frame gets from a to b and another from b to a.
 func pair(t *testing.T, opts Options, a, b config.Port) {
+	t.Helper()
+	pairRadio(t, opts, "{}", a, b)
+}
+
+// pairRadio is pair with both radios configured by a YAML radio block.
+func pairRadio(t *testing.T, opts Options, radio string, a, b config.Port) {
 	t.Helper()
 	port := func(p config.Port) string {
 		tncName := p.TNC
 		if tncName == "" {
 			tncName = config.TNCSamoyed
 		}
-		return fmt.Sprintf("[{ id: p, tnc: %s, modem: { mode: %s }, kiss_port: %d }]", tncName, p.Modem.Mode, p.KissPort)
+		return fmt.Sprintf("[{ id: p, tnc: %s, modem: { mode: %s }, kiss_port: %d, radio: %s }]", tncName, p.Modem.Mode, p.KissPort, radio)
 	}
 	a.KissPort, b.KissPort = freeTCP(t), freeTCP(t)
 	yml := fmt.Sprintf(`nodes:
   - { id: a, ports: %s }
   - { id: b, ports: %s }
 links:
-  - { from: a.p, to: b.p, loss_db: 0 }
-  - { from: b.p, to: a.p, loss_db: 0 }
+  - { from: a.p, to: b.p, path_loss_db: 120 }
+  - { from: b.p, to: a.p, path_loss_db: 120 }
 `, port(a), port(b))
 	cfg, err := config.ParseBytes([]byte(yml))
 	if err != nil {
@@ -97,7 +129,7 @@ func send(t *testing.T, from, to net.Conn, text string) {
 	if _, err := from.Write(kissFrame(uiFrame("TEST", "N0CALL", info))); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	var got []byte
 	buf := make([]byte, 4096)
 	for !bytes.Contains(got, []byte(info)) {

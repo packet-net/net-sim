@@ -101,12 +101,12 @@ type Port struct {
 	// modem's own mode names (qpsk3600, c4fsk9600, ofdm-fm-8k, ...).
 	TNC TNCBackend `yaml:"tnc,omitempty"`
 
-	// NoiseDB overrides the global DefaultNoiseDB for this port's
-	// receiver. Positive value = dB below full-scale (quieter); 0 or
-	// negative = inherit the global default. Use higher values for
-	// "quiet RX site" (less noise floor) and lower values for "noisy
-	// urban environment".
-	NoiseDB float64 `yaml:"noise_db,omitempty"`
+	// Radio is this port's FM transceiver. Optional: every field has a
+	// default, a Tait TM8100 on a 12.5 kHz channel via its data taps.
+	Radio Radio `yaml:"radio,omitempty"`
+
+	// Retired: noise now comes from each receiver's noise figure and site.
+	LegacyNoiseDB any `yaml:"noise_db,omitempty"`
 }
 
 // TNCBackend names the TNC implementation.
@@ -131,56 +131,35 @@ type Node struct {
 	Ports []Port `yaml:"ports"`
 }
 
-// Link is a one-directional audio path between two ports.
+// Link is a one-directional RF path between two ports' radios.
 type Link struct {
-	From   string  `yaml:"from"`    // "<node_id>.<port_id>"
-	To     string  `yaml:"to"`      // "<node_id>.<port_id>"
-	LossDB float64 `yaml:"loss_db"` // attenuation, positive number = quieter
+	From string `yaml:"from"` // "<node_id>.<port_id>"
+	To   string `yaml:"to"`   // "<node_id>.<port_id>"
 
-	// NoiseDB is the white-noise floor on this link, expressed as dB
-	// below full-scale (positive = quieter; 0 = no noise). Phase 4.
-	NoiseDB float64 `yaml:"noise_db,omitempty"`
+	// PathLossDB is the RF path loss between the two antennas, dB.
+	// Required. With the default radios (25 W, residential site noise) 120
+	// is a strong local link, about 155 is near the edge for 1200 baud and
+	// 165 is below the receiver's threshold.
+	PathLossDB *float64 `yaml:"path_loss_db"`
 
-	// SquelchOpenMS mutes the first N milliseconds of every transmission
-	// as heard via this link, modelling the receiving radio's squelch /
-	// carrier-detect opening delay (tens of ms on real FM gear, plus
-	// discriminator settle). This is exactly the on-air reason KISS
-	// TXDELAY exists; without it a tiny TXDELAY looks fine in simulation
-	// when it wouldn't be on air. 0 (the default) = squelch opens
-	// instantly — previous behaviour. Valid range 0..500.
-	SquelchOpenMS float64 `yaml:"squelch_open_ms,omitempty"`
+	// Retired keys, refused with a note saying what replaced them.
+	LegacyLossDB        any `yaml:"loss_db,omitempty"`
+	LegacyNoiseDB       any `yaml:"noise_db,omitempty"`
+	LegacySquelchOpenMS any `yaml:"squelch_open_ms,omitempty"`
 }
-
-// MixerMode selects the receiver-side mixing model.
-type MixerMode string
-
-const (
-	MixerFMCapture MixerMode = "fm_capture" // default — see PLAN Phase 3
-	MixerLinearSum MixerMode = "linear_sum" // SSB future, stub only
-)
-
-// CollisionMode selects what happens when two TX signals arrive at one
-// receiver and neither captures the other (margin < CaptureDB).
-type CollisionMode string
-
-const (
-	CollisionSilence CollisionMode = "silence" // default — clean digital silence
-	CollisionSum     CollisionMode = "sum"     // stub
-	CollisionNoise   CollisionMode = "noise"   // gaussian garble at the strongest signal's level
-)
 
 // Config is the whole topology file.
 type Config struct {
-	MixerMode     MixerMode     `yaml:"mixer_mode,omitempty"`
-	CaptureDB     float64       `yaml:"capture_db,omitempty"`
-	CollisionMode CollisionMode `yaml:"collision_mode,omitempty"`
+	// FrequencyMHz is the band, which sets how much man-made noise each
+	// receiver's site adds (it falls steeply with frequency). Default 145.
+	FrequencyMHz float64 `yaml:"frequency_mhz,omitempty"`
 
-	// DefaultNoiseDB is the band-noise floor heard by every receiver
-	// unless its Port.NoiseDB overrides it. Positive value = dB below
-	// full-scale (quieter). Models the "FM band hiss" you'd hear on
-	// any real radio with the squelch open. Zero or negative = no
-	// global floor (back to the old per-link-only behaviour).
-	DefaultNoiseDB float64 `yaml:"default_noise_db,omitempty"`
+	// Retired: the FM channel model produces capture, collisions and
+	// noise itself.
+	LegacyMixerMode      any `yaml:"mixer_mode,omitempty"`
+	LegacyCaptureDB      any `yaml:"capture_db,omitempty"`
+	LegacyCollisionMode  any `yaml:"collision_mode,omitempty"`
+	LegacyDefaultNoiseDB any `yaml:"default_noise_db,omitempty"`
 
 	// TimeScale runs the simulation N× faster than wall clock (default
 	// 1.0 = real time; values < 1.0 are rejected). The router divides
@@ -232,16 +211,6 @@ func Parse(r io.Reader) (*Config, error) {
 		return nil, fmt.Errorf("yaml: %w", err)
 	}
 
-	// capture_db: 0 is meaningful (the strongest signal always captures),
-	// so only an absent key takes the default.
-	var present struct {
-		CaptureDB *float64 `yaml:"capture_db"`
-	}
-	_ = yaml.Unmarshal(raw, &present)
-	if present.CaptureDB == nil {
-		cfg.CaptureDB = defaultCaptureDB
-	}
-
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -250,19 +219,13 @@ func Parse(r io.Reader) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
-	if c.MixerMode == "" {
-		c.MixerMode = MixerFMCapture
-	}
-	if c.CollisionMode == "" {
-		c.CollisionMode = CollisionSilence
+	if c.FrequencyMHz == 0 {
+		c.FrequencyMHz = 145
 	}
 	if c.TimeScale == 0 {
 		c.TimeScale = 1.0
 	}
 }
-
-// defaultCaptureDB is the FM capture ratio used when capture_db is absent.
-const defaultCaptureDB = 6.0
 
 // maxTimeScale bounds time_scale. At 100 x the router's 10 ms block ticker
 // is already 100 us, beyond which the TNCs can't keep up anyway, and a
@@ -283,23 +246,22 @@ func (c *Config) Validate() error {
 	if len(c.Nodes) == 0 {
 		return errors.New("config: no nodes defined")
 	}
-	switch c.MixerMode {
-	case MixerFMCapture, MixerLinearSum:
-	default:
-		return fmt.Errorf("config: unknown mixer_mode %q", c.MixerMode)
+	const channelModel = "the FM channel model produces capture, collisions and noise itself (see README, FM channel)"
+	for key, v := range map[string]any{"mixer_mode": c.LegacyMixerMode, "capture_db": c.LegacyCaptureDB, "collision_mode": c.LegacyCollisionMode} {
+		if v != nil {
+			return fmt.Errorf("config: %s is no longer used: %s; remove it", key, channelModel)
+		}
 	}
-	switch c.CollisionMode {
-	case CollisionSilence, CollisionSum, CollisionNoise:
-	default:
-		return fmt.Errorf("config: unknown collision_mode %q", c.CollisionMode)
+	if c.LegacyDefaultNoiseDB != nil {
+		return errors.New("config: default_noise_db is no longer used: each receiver's noise comes from its radio's noise figure and site (radio: { site_noise: residential }); remove it")
 	}
-	for name, v := range map[string]float64{"capture_db": c.CaptureDB, "default_noise_db": c.DefaultNoiseDB, "time_scale": c.TimeScale} {
+	for name, v := range map[string]float64{"frequency_mhz": c.FrequencyMHz, "time_scale": c.TimeScale} {
 		if !finite(v) {
 			return fmt.Errorf("config: %s must be a finite number, got %g", name, v)
 		}
 	}
-	if c.CaptureDB < 0 {
-		return fmt.Errorf("config: capture_db must be >= 0, got %g", c.CaptureDB)
+	if c.FrequencyMHz < 1 || c.FrequencyMHz > 10000 {
+		return fmt.Errorf("config: frequency_mhz must be in 1..10000, got %g", c.FrequencyMHz)
 	}
 	if c.TimeScale < 1 {
 		return fmt.Errorf("config: time_scale must be >= 1.0, got %g (slower-than-real-time is not supported)", c.TimeScale)
@@ -349,8 +311,11 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("config: kiss_port %d used by both %s and %s.%s", p.KissPort, existing, n.ID, p.ID)
 			}
 			usedKissPorts[p.KissPort] = n.ID + "." + p.ID
-			if !finite(p.NoiseDB) {
-				return fmt.Errorf("config: %s.%s: noise_db must be a finite number", n.ID, p.ID)
+			if p.LegacyNoiseDB != nil {
+				return fmt.Errorf("config: %s.%s: noise_db is no longer used: noise comes from the radio's noise figure and site (radio: { site_noise: rural }); remove it", n.ID, p.ID)
+			}
+			if err := p.Radio.validate(); err != nil {
+				return fmt.Errorf("config: %s.%s radio: %w", n.ID, p.ID, err)
 			}
 
 			switch p.TNC {
@@ -399,14 +364,20 @@ func (c *Config) Validate() error {
 		if !fromModem.Equivalent(toModem) {
 			return fmt.Errorf("config: link %s -> %s: modem mismatch (%s vs %s)", fromRef, toRef, fromModem.Mode, toModem.Mode)
 		}
-		if !finite(l.LossDB) || !finite(l.NoiseDB) || !finite(l.SquelchOpenMS) {
-			return fmt.Errorf("config: link %s -> %s: loss_db, noise_db and squelch_open_ms must be finite numbers", fromRef, toRef)
+		if l.LegacyLossDB != nil {
+			return fmt.Errorf("config: link %s -> %s: loss_db is no longer used: links take path_loss_db, the RF path loss between the radios (120 is a strong local link, about 155 the edge of 1200 baud)", fromRef, toRef)
 		}
-		if l.LossDB < 0 {
-			return fmt.Errorf("config: link %s -> %s: loss_db must be >= 0", fromRef, toRef)
+		if l.LegacyNoiseDB != nil {
+			return fmt.Errorf("config: link %s -> %s: noise_db is no longer used: noise comes from the receiving radio's noise figure and site; remove it", fromRef, toRef)
 		}
-		if l.SquelchOpenMS < 0 || l.SquelchOpenMS > 500 {
-			return fmt.Errorf("config: link %s -> %s: squelch_open_ms must be in 0..500, got %g", fromRef, toRef, l.SquelchOpenMS)
+		if l.LegacySquelchOpenMS != nil {
+			return fmt.Errorf("config: link %s -> %s: squelch_open_ms is no longer used: squelch belongs to the receiving radio (radio: { squelch: { preset: city, open_ms: 30 } })", fromRef, toRef)
+		}
+		if l.PathLossDB == nil {
+			return fmt.Errorf("config: link %s -> %s: path_loss_db is required (the RF path loss between the radios; 120 is a strong local link)", fromRef, toRef)
+		}
+		if pl := *l.PathLossDB; !finite(pl) || pl < 0 || pl > 250 {
+			return fmt.Errorf("config: link %s -> %s: path_loss_db must be in 0..250, got %g", fromRef, toRef, pl)
 		}
 		key := fromRef.String() + "->" + toRef.String()
 		if seenLink[key] {

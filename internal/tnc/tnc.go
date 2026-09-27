@@ -60,6 +60,12 @@ type Spec struct {
 	PdnBin      string // path to pdn-soundmodem
 	WorkDir     string // scratch dir for per-port config files (and FIFOs, for direwolf)
 
+	// RxPrime, if set, is receive audio (the router's format) to have
+	// waiting at the TNC's audio input before it starts, so a TNC that
+	// reads its input in real time (pdn-soundmodem) begins on what its
+	// radio would really be giving it rather than on silence.
+	RxPrime []byte
+
 	// StderrTap, if non-nil, also receives the TNC's stdout/stderr
 	// (unprefixed). Used by router.Observer to scrape locally-
 	// transmitted callsigns. The existing prefixed-to-real-stderr
