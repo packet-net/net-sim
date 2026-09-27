@@ -11,7 +11,7 @@
 
 services:
   net-sim:
-    image: ghcr.io/packethacking/net-sim:main
+    image: ghcr.io/packet-net/net-sim:main
     # network_mode: host is the simplest option when KISS ports vary by
     # config — KISS sockets bind directly on the host. Comment this out
     # and switch to explicit `ports:` if you need stricter isolation.
