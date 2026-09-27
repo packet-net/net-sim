@@ -102,7 +102,7 @@ func (r Radio) validate() error {
 		"audio_low_hz": r.AudioLowHz, "audio_high_hz": r.AudioHighHz, "emphasis_us": deref(r.EmphasisUs),
 		"feeder_loss_db": r.FeederLossDB, "noise_figure_db": deref(r.NoiseFigureDB),
 		"squelch hysteresis_db": r.Squelch.HysteresisDB,
-		"squelch open_ms": r.Squelch.OpenMS, "squelch close_ms": r.Squelch.CloseMS,
+		"squelch open_ms":       r.Squelch.OpenMS, "squelch close_ms": r.Squelch.CloseMS,
 	} {
 		if v < 0 {
 			return fmt.Errorf("%s must not be negative", name)
