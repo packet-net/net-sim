@@ -106,7 +106,7 @@ type Port struct {
 	Radio Radio `yaml:"radio,omitempty"`
 
 	// Retired: noise now comes from each receiver's noise figure and site.
-	LegacyNoiseDB any `yaml:"noise_db,omitempty"`
+	LegacyNoiseDB yaml.Node `yaml:"noise_db,omitempty"`
 }
 
 // TNCBackend names the TNC implementation.
@@ -143,9 +143,9 @@ type Link struct {
 	PathLossDB *float64 `yaml:"path_loss_db"`
 
 	// Retired keys, refused with a note saying what replaced them.
-	LegacyLossDB        any `yaml:"loss_db,omitempty"`
-	LegacyNoiseDB       any `yaml:"noise_db,omitempty"`
-	LegacySquelchOpenMS any `yaml:"squelch_open_ms,omitempty"`
+	LegacyLossDB        yaml.Node `yaml:"loss_db,omitempty"`
+	LegacyNoiseDB       yaml.Node `yaml:"noise_db,omitempty"`
+	LegacySquelchOpenMS yaml.Node `yaml:"squelch_open_ms,omitempty"`
 }
 
 // Config is the whole topology file.
@@ -156,10 +156,10 @@ type Config struct {
 
 	// Retired: the FM channel model produces capture, collisions and
 	// noise itself.
-	LegacyMixerMode      any `yaml:"mixer_mode,omitempty"`
-	LegacyCaptureDB      any `yaml:"capture_db,omitempty"`
-	LegacyCollisionMode  any `yaml:"collision_mode,omitempty"`
-	LegacyDefaultNoiseDB any `yaml:"default_noise_db,omitempty"`
+	LegacyMixerMode      yaml.Node `yaml:"mixer_mode,omitempty"`
+	LegacyCaptureDB      yaml.Node `yaml:"capture_db,omitempty"`
+	LegacyCollisionMode  yaml.Node `yaml:"collision_mode,omitempty"`
+	LegacyDefaultNoiseDB yaml.Node `yaml:"default_noise_db,omitempty"`
 
 	// TimeScale runs the simulation N× faster than wall clock (default
 	// 1.0 = real time; values < 1.0 are rejected). The router divides
@@ -247,12 +247,12 @@ func (c *Config) Validate() error {
 		return errors.New("config: no nodes defined")
 	}
 	const channelModel = "the FM channel model produces capture, collisions and noise itself (see README, FM channel)"
-	for key, v := range map[string]any{"mixer_mode": c.LegacyMixerMode, "capture_db": c.LegacyCaptureDB, "collision_mode": c.LegacyCollisionMode} {
-		if v != nil {
+	for key, v := range map[string]yaml.Node{"mixer_mode": c.LegacyMixerMode, "capture_db": c.LegacyCaptureDB, "collision_mode": c.LegacyCollisionMode} {
+		if present(v) {
 			return fmt.Errorf("config: %s is no longer used: %s; remove it", key, channelModel)
 		}
 	}
-	if c.LegacyDefaultNoiseDB != nil {
+	if present(c.LegacyDefaultNoiseDB) {
 		return errors.New("config: default_noise_db is no longer used: each receiver's noise comes from its radio's noise figure and site (radio: { site_noise: residential }); remove it")
 	}
 	for name, v := range map[string]float64{"frequency_mhz": c.FrequencyMHz, "time_scale": c.TimeScale} {
@@ -311,11 +311,22 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("config: kiss_port %d used by both %s and %s.%s", p.KissPort, existing, n.ID, p.ID)
 			}
 			usedKissPorts[p.KissPort] = n.ID + "." + p.ID
-			if p.LegacyNoiseDB != nil {
+			if present(p.LegacyNoiseDB) {
 				return fmt.Errorf("config: %s.%s: noise_db is no longer used: noise comes from the radio's noise figure and site (radio: { site_noise: rural }); remove it", n.ID, p.ID)
 			}
 			if err := p.Radio.validate(); err != nil {
 				return fmt.Errorf("config: %s.%s radio: %w", n.ID, p.ID, err)
+			}
+			if r := p.Radio.FM(); !r.Squelch.Open {
+				// Squelch compares total received power, noise included,
+				// with its threshold, as a real radio's RSSI does. If it
+				// closes below the noise floor it opens on the first
+				// signal and never closes again.
+				closeAt := r.Squelch.ThresholdDBm - r.Squelch.HysteresisDB
+				if floor := r.NoiseFloorDBm(c.FrequencyMHz); closeAt <= floor {
+					return fmt.Errorf("config: %s.%s radio: the squelch closes at %.1f dBm, under this receiver's noise floor of %.1f dBm (%s site at %g MHz), so it would open on the first signal and never close; use squelch: hard, a threshold_dbm above %.1f plus its hysteresis, or a quieter site_noise",
+						n.ID, p.ID, closeAt, floor, r.Site, c.FrequencyMHz, floor)
+				}
 			}
 
 			switch p.TNC {
@@ -364,13 +375,13 @@ func (c *Config) Validate() error {
 		if !fromModem.Equivalent(toModem) {
 			return fmt.Errorf("config: link %s -> %s: modem mismatch (%s vs %s)", fromRef, toRef, fromModem.Mode, toModem.Mode)
 		}
-		if l.LegacyLossDB != nil {
+		if present(l.LegacyLossDB) {
 			return fmt.Errorf("config: link %s -> %s: loss_db is no longer used: links take path_loss_db, the RF path loss between the radios (120 is a strong local link, about 155 the edge of 1200 baud)", fromRef, toRef)
 		}
-		if l.LegacyNoiseDB != nil {
+		if present(l.LegacyNoiseDB) {
 			return fmt.Errorf("config: link %s -> %s: noise_db is no longer used: noise comes from the receiving radio's noise figure and site; remove it", fromRef, toRef)
 		}
-		if l.LegacySquelchOpenMS != nil {
+		if present(l.LegacySquelchOpenMS) {
 			return fmt.Errorf("config: link %s -> %s: squelch_open_ms is no longer used: squelch belongs to the receiving radio (radio: { squelch: { preset: city, open_ms: 30 } })", fromRef, toRef)
 		}
 		if l.PathLossDB == nil {
@@ -388,6 +399,10 @@ func (c *Config) Validate() error {
 
 	return nil
 }
+
+// present reports whether a retired key appeared in the file at all, even
+// as null.
+func present(n yaml.Node) bool { return n.Kind != 0 }
 
 func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 

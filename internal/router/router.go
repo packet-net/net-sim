@@ -58,6 +58,12 @@ const txActiveThreshold = 1500
 // scaled audio stream would otherwise fire tx_end mid-transmission.
 const txSilenceWindow = 200 * time.Millisecond
 
+// txTailGap is the quiet spell on a TNC's transmit audio that ends a
+// keyup. TNCs write a keyup far faster than real time, so a gap this long
+// inside one means the TNC has stopped. Kept short so the end of a short
+// transmission joins its carrier before the receivers have played it out.
+const txTailGap = 50 * time.Millisecond
+
 // txWatchdogTick is how often the watchdog re-checks staleness at
 // time_scale 1. Scaled down with time_scale so end-of-keying detection
 // keeps the same sim-time resolution.
@@ -247,6 +253,13 @@ func (q *linkQueue) push(qb queuedBlock, logger *slog.Logger) {
 		logger.Warn("audio queue safety cap reached (rxFeeder stalled?)", "from", q.src, "to", q.dst)
 	}
 	q.buf = append(q.buf, qb)
+}
+
+// len is how many blocks are waiting.
+func (q *linkQueue) len() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.buf)
 }
 
 // pop returns one block if immediately available (FIFO, oldest first).
@@ -559,27 +572,36 @@ func (r *Router) txReader(ctx context.Context, ref config.PortRef, src io.Reader
 	pending := make([]byte, 0, audio.BlockBytes*4)
 	outgoing := r.linkQueues[ref] // empty slice if this port has no outgoing links
 	tt := r.txTrackers[ref]       // may be nil only if Start partially failed
+	st := r.stations[ref]         // nil only in tests that build a bare Router
+	period := scaled(blockPeriod, r.cfg.TimeScale)
 
-	// A TNC's burst rarely ends on a block boundary, and the remainder
-	// would otherwise sit in pending until the next transmission, then go
-	// out in front of it. Where the source supports read deadlines
-	// (samoyed's UDP, direwolf's FIFO), a quiet spell as long as the
-	// transmission-boundary window flushes it as a zero-padded block
-	// belonging to the transmission that just ended. The pdn backend pads
-	// its own bursts, so it needs none of this.
+	// The end of a keyup needs care. A TNC's burst rarely ends on a block
+	// boundary, and the transmitter's filters still hold its last few ms;
+	// left alone, both would go out in front of the next transmission.
+	// Where the source supports read deadlines (samoyed's UDP, direwolf's
+	// FIFO), a quiet spell of txTailGap ends the keyup: the remainder goes
+	// out zero-padded, the transmitter's filters are flushed, and it starts
+	// the next keyup clean. The pdn backend pads its own bursts, and any
+	// source's first block after a gap resets the transmitter too.
 	dl, _ := src.(interface{ SetReadDeadline(time.Time) error })
-	tailGap := scaled(txSilenceWindow, r.cfg.TimeScale)
-	deadlineSet := false
+	tailGap := scaled(txTailGap, r.cfg.TimeScale)
+	inBurst := false
+	var lastEmit time.Time
 
-	emit := func(blk audio.Block, tail bool) {
+	// emit sends one block. tail marks the end-of-keyup blocks (the padded
+	// remainder and the filter flush), which don't count as activity and
+	// are dropped if every receiver's carrier from this port has already
+	// ended: keying up again for 10 ms just to deliver a scrap would be
+	// a transmission that never happened. record is false for the flush,
+	// which is the transmitter's, not the TNC's.
+	emit := func(blk audio.Block, tail, record bool) {
 		peak := blk.PeakAbs()
 		if r.opts.Verbose {
 			r.logger.Debug("tx block", "port", ref, "peak", peak, "outgoing", len(outgoing), "tail", tail)
 		}
 		// Bump the TX tracker on every active block; the watchdog
 		// goroutine emits tx_start (first bump) and tx_end (after
-		// txSilenceWindow with no further bumps). A flushed tail is the
-		// end of a transmission, not activity.
+		// txSilenceWindow with no further bumps).
 		if !tail && r.opts.EventBus != nil && tt != nil && peak >= txActiveThreshold {
 			tt.lastBusyNanos.Store(time.Now().UnixNano())
 			if !tt.active.Swap(true) {
@@ -591,45 +613,55 @@ func (r *Router) txReader(ctx context.Context, ref config.PortRef, src io.Reader
 				})
 			}
 		}
-		if s := r.session.Load(); s != nil {
-			s.WriteTX(ref, blk)
-		}
-		if cr := r.composite.Load(); cr != nil {
-			cr.feed(ref, blk)
-		}
-		if r.opts.AudioTap != nil {
-			key := ref.String() + "|tx"
-			if r.opts.AudioTap.HasSubscribers(key) {
-				r.opts.AudioTap.Publish(key, blk)
+		if record {
+			if s := r.session.Load(); s != nil {
+				s.WriteTX(ref, blk)
 			}
+			if cr := r.composite.Load(); cr != nil {
+				cr.feed(ref, blk)
+			}
+			if r.opts.AudioTap != nil {
+				key := ref.String() + "|tx"
+				if r.opts.AudioTap.HasSubscribers(key) {
+					r.opts.AudioTap.Publish(key, blk)
+				}
+			}
+		}
+		if tail && !anyQueued(outgoing) {
+			return
 		}
 		// Modulate once; every link shares the carrier. Even a radio with
 		// no links is on the air (and so deaf) while it transmits.
 		qb := queuedBlock{blk: blk}
-		if st := r.stations[ref]; st != nil {
-			qb.iq = st.modulate(blk, scaled(blockPeriod, r.cfg.TimeScale))
+		if st != nil {
+			if !tail && !lastEmit.IsZero() && time.Since(lastEmit) >= tailGap {
+				st.tx.Reset() // a new keyup
+			}
+			qb.iq = st.modulate(blk, period)
 		}
+		lastEmit = time.Now()
 		for _, q := range outgoing {
 			q.push(qb, r.logger)
 		}
 	}
 
 	for {
-		if dl != nil && (len(pending) > 0) != deadlineSet {
-			deadlineSet = len(pending) > 0
-			when := time.Time{}
-			if deadlineSet {
-				when = time.Now().Add(tailGap)
-			}
-			_ = dl.SetReadDeadline(when)
-		}
 		n, err := src.Read(buf)
 		if err != nil {
-			if deadlineSet && errors.Is(err, os.ErrDeadlineExceeded) {
-				blk := make(audio.Block, audio.BlockBytes)
-				copy(blk, pending)
-				pending = pending[:0]
-				emit(blk, true)
+			if inBurst && errors.Is(err, os.ErrDeadlineExceeded) {
+				// The keyup is over.
+				if len(pending) > 0 {
+					blk := make(audio.Block, audio.BlockBytes)
+					copy(blk, pending)
+					pending = pending[:0]
+					emit(blk, true, true)
+				}
+				emit(audio.Silence(), true, false)
+				if st != nil {
+					st.tx.Reset()
+				}
+				inBurst = false
+				_ = dl.SetReadDeadline(time.Time{})
 				continue
 			}
 			// EOF / closed-during-shutdown is the normal exit path.
@@ -642,8 +674,9 @@ func (r *Router) txReader(ctx context.Context, ref config.PortRef, src io.Reader
 		if n == 0 {
 			continue
 		}
-		if deadlineSet {
+		if dl != nil {
 			// Still transmitting: push the deadline out again.
+			inBurst = true
 			_ = dl.SetReadDeadline(time.Now().Add(tailGap))
 		}
 		pending = append(pending, buf[:n]...)
@@ -651,9 +684,20 @@ func (r *Router) txReader(ctx context.Context, ref config.PortRef, src io.Reader
 			blk := make(audio.Block, audio.BlockBytes)
 			copy(blk, pending[:audio.BlockBytes])
 			pending = pending[audio.BlockBytes:]
-			emit(blk, false)
+			emit(blk, false, true)
 		}
 	}
+}
+
+// anyQueued reports whether any of the links still has audio waiting, i.e.
+// the transmission is still on the air somewhere.
+func anyQueued(qs []*linkQueue) bool {
+	for _, q := range qs {
+		if q.len() > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // txWatchdog fires tx_end after a port has been idle for txSilenceWindow.

@@ -175,3 +175,19 @@ func TestNoiseFloor(t *testing.T) {
 		t.Errorf("residential site raises the floor by %.1f dB, want about 7.5", res-got)
 	}
 }
+
+// After Reset, nothing of the previous keyup comes out of the transmitter:
+// silence in gives an unmodulated carrier from the first sample.
+func TestTransmitterResetClearsLastKeyup(t *testing.T) {
+	radio := Radio{Path: VoicePath}.Default()
+	tx := NewTransmitter(radio.TxPath(), refRate, 2)
+	tx.Process(tone(1000, 0.9, 0.05), nil)
+	tx.Reset()
+	out := tx.Process(make([]float32, 480), nil)
+	for i := 1; i < len(out); i++ {
+		d := out[i] * complex(real(out[i-1]), -imag(out[i-1]))
+		if math.Abs(math.Atan2(imag(d), real(d))) > 1e-9 {
+			t.Fatalf("sample %d still deviates after Reset", i)
+		}
+	}
+}

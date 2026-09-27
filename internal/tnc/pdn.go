@@ -68,7 +68,7 @@ const (
 // pdnTxBurstGap is how long the transmit FIFO has to be quiet before we
 // call the keyup over. pdn writes a keyup far faster than real time, so a
 // gap this long inside one only happens if pdn itself has stalled.
-const pdnTxBurstGap = 100 * time.Millisecond
+const pdnTxBurstGap = 50 * time.Millisecond
 
 // pdnPipeBytes is the FIFO capacity we ask for (Linux F_SETPIPE_SZ). The
 // default 64 KiB holds only 340 ms of 48 kHz float audio.

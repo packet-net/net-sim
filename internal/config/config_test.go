@@ -483,3 +483,69 @@ func TestShippedConfigsLoad(t *testing.T) {
 		}
 	}
 }
+
+func parseRadio(t *testing.T, top, radio string) (*Config, error) {
+	t.Helper()
+	return Parse(strings.NewReader(top + `
+nodes:
+  - id: a
+    ports:
+      - { id: vhf, modem: { mode: afsk1200 }, kiss_port: 8001, radio: ` + radio + ` }
+links: []
+`))
+}
+
+func TestRadioExplicitZerosAreKept(t *testing.T) {
+	cfg, err := parseRadio(t, "", "{ path: voice, emphasis_us: 0, limit_hz: 0, rx_level_dbfs: 0, noise_figure_db: 0 }")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.Nodes[0].Ports[0].Radio.FM()
+	if r.EmphasisUs != 0 || r.LimitHz != 0 || r.RxLevelDBFS != 0 || r.NoiseFigureDB != 0 {
+		t.Errorf("explicit zeros replaced by defaults: %+v", r)
+	}
+}
+
+func TestSquelchThatCantCloseIsRefused(t *testing.T) {
+	// city closes at -121 dBm; a residential site at 145 MHz has a floor
+	// of about -120.8, so it would never close.
+	if _, err := parseRadio(t, "", "{ squelch: city }"); err == nil || !strings.Contains(err.Error(), "never close") {
+		t.Errorf("city squelch at a residential site: want a never-close refusal, got %v", err)
+	}
+	// A rural site is quiet enough.
+	if _, err := parseRadio(t, "", "{ squelch: city, site_noise: rural }"); err != nil {
+		t.Errorf("city squelch at a rural site: %v", err)
+	}
+	if _, err := parseRadio(t, "", "{ squelch: hard }"); err != nil {
+		t.Errorf("hard squelch: %v", err)
+	}
+	// A preset's hysteresis can be overridden, which can rescue it.
+	cfg, err := parseRadio(t, "", "{ squelch: { preset: city, hysteresis_db: 2 } }")
+	if err != nil {
+		t.Fatalf("city with 2 dB hysteresis: %v", err)
+	}
+	if h := cfg.Nodes[0].Ports[0].Radio.FM().Squelch.HysteresisDB; h != 2 {
+		t.Errorf("hysteresis override: got %g, want 2", h)
+	}
+}
+
+func TestRadioSettingsThatWouldBeIgnoredAreRefused(t *testing.T) {
+	for _, radio := range []string{
+		"{ squelch: { open_ms: 30 } }",
+		"{ squelch: { preset: open, hysteresis_db: 3 } }",
+		"{ path: voice, audio_low_hz: 3500 }",
+		"{ frequency_error_hz: 90000 }",
+		"{ tx_power_w: 0 }",
+		"{ hum_noise_db: 0 }",
+	} {
+		if _, err := parseRadio(t, "", radio); err == nil {
+			t.Errorf("radio %s: accepted, want an error", radio)
+		}
+	}
+}
+
+func TestRetiredKeysSetToNullAreRefused(t *testing.T) {
+	if _, err := parseRadio(t, "capture_db: null\n", "{}"); err == nil {
+		t.Error("capture_db: null accepted")
+	}
+}

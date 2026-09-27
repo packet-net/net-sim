@@ -32,6 +32,9 @@ func newFIR(h []float64) *fir {
 	return &fir{h: h, hist: make([]complex128, len(h)-1), spectra: map[int][]complex128{}}
 }
 
+// reset clears the filter's history.
+func (f *fir) reset() { clear(f.hist) }
+
 // process filters x in place.
 func (f *fir) process(x []complex128) {
 	m := len(f.h)

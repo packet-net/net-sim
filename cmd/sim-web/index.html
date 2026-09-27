@@ -474,7 +474,7 @@ function renderForm() {
   const chNote = document.createElement("div");
   chNote.className = "muted";
   chNote.style.fontSize = ".85em";
-  chNote.textContent = "Every port is an FM radio (a Tait TM8100 by default). Links set the RF path loss: about 120 dB is a strong local link, 155 the edge for 1200 baud. More radio settings are in the YAML tab.";
+  chNote.textContent = "Every port is an FM radio (a Tait TM8100 by default). Links set the RF path loss: about 120 dB is a strong local link, 157 the edge for 1200 baud. The country and city squelch presets close below a residential site's noise floor, so they need a quieter site_noise; hard works anywhere. More radio settings are in the YAML tab.";
   channel.body.appendChild(chNote);
   root.appendChild(channel.el);
 
@@ -628,9 +628,7 @@ function renderPort(node, ni, port, pi) {
   body.appendChild(mkRow(
     field("Channel", select(CHANNELS, port.radio.channel || "narrow", v => port.radio.channel = v)),
     field("Radio path", select(PATHS, port.radio.path || "data", v => port.radio.path = v)),
-    field("Squelch", select(SQUELCHES,
-      typeof port.radio.squelch === "string" ? port.radio.squelch : "open",
-      v => { if (v === "open") delete port.radio.squelch; else port.radio.squelch = v; })),
+    field("Squelch", squelchSelect(port.radio)),
   ));
 
   // mode-specific extras
@@ -652,6 +650,26 @@ function renderPort(node, ni, port, pi) {
   }
 
   return sb;
+}
+
+// The squelch is a preset name or a mapping ({ preset, open_ms, close_ms,
+// hysteresis_db } or { threshold_dbm, ... }). A threshold shows as
+// "custom" (edit it in the YAML tab); picking a preset keeps any timing.
+function squelchSelect(radio) {
+  const sq = radio.squelch;
+  let current = "open";
+  if (typeof sq === "string") current = sq;
+  else if (sq && typeof sq === "object") current = sq.threshold_dbm ? "custom" : (sq.preset || "open");
+  const options = current === "custom" ? [...SQUELCHES, "custom"] : SQUELCHES;
+  return select(options, current, v => {
+    if (v === "custom") return;
+    if (v === "open") { delete radio.squelch; return; }
+    if (sq && typeof sq === "object" && !sq.threshold_dbm) {
+      radio.squelch = { ...sq, preset: v };
+    } else {
+      radio.squelch = v;
+    }
+  });
 }
 
 function renderLinksGrid(portRefs) {
