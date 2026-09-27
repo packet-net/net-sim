@@ -14,10 +14,9 @@ import (
 	"github.com/packethacking/net-sim/internal/tnc"
 )
 
-// End-to-end tests for the pdn-soundmodem backend: two real TNCs joined by
-// the router, a KISS frame in at one end and out of the other. They need a
-// pdn-soundmodem binary (PDN_BIN, $PATH or /usr/bin) and skip without one.
-// The direwolf interop test also needs direwolf.
+// End-to-end tests: two real TNCs joined by the router, a KISS frame in at
+// one end and out of the other. Each needs its binaries (PDN_BIN,
+// SAMOYED_BIN, DIREWOLF_BIN, or $PATH) and skips without them.
 
 func findBackend(t *testing.T, b tnc.Backend, env string) string {
 	t.Helper()
@@ -174,4 +173,27 @@ func uiFrame(dest, src, info string) []byte {
 	f := append(addr(dest, false), addr(src, true)...)
 	f = append(f, 0x03, 0xF0)
 	return append(f, info...)
+}
+
+func TestSamoyedInterop(t *testing.T) {
+	sam := findBackend(t, tnc.BackendSamoyed, "SAMOYED_BIN")
+	for _, mode := range []config.Mode{config.ModeAFSK1200, config.ModeGFSK9600} {
+		t.Run(string(mode)+"/samoyed-samoyed", func(t *testing.T) {
+			pair(t, Options{SamoyedBin: sam},
+				config.Port{TNC: config.TNCSamoyed, Modem: config.Modem{Mode: mode}},
+				config.Port{TNC: config.TNCSamoyed, Modem: config.Modem{Mode: mode}})
+		})
+		t.Run(string(mode)+"/samoyed-direwolf", func(t *testing.T) {
+			dw := findBackend(t, tnc.BackendDirewolf, "DIREWOLF_BIN")
+			pair(t, Options{SamoyedBin: sam, DirewolfBin: dw},
+				config.Port{TNC: config.TNCSamoyed, Modem: config.Modem{Mode: mode}},
+				config.Port{TNC: config.TNCDirewolf, Modem: config.Modem{Mode: mode}})
+		})
+		t.Run(string(mode)+"/samoyed-pdn", func(t *testing.T) {
+			pdn := findBackend(t, tnc.BackendPdn, "PDN_BIN")
+			pair(t, Options{SamoyedBin: sam, PdnBin: pdn},
+				config.Port{TNC: config.TNCSamoyed, Modem: config.Modem{Mode: mode}},
+				config.Port{TNC: config.TNCPdn, Modem: config.Modem{Mode: mode}})
+		})
+	}
 }

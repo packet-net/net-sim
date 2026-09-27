@@ -25,12 +25,12 @@ import (
 	"os/exec"
 	"sync"
 
+	"github.com/packethacking/net-sim/internal/audio"
 	"github.com/packethacking/net-sim/internal/config"
 )
 
-// SampleRate is the audio sample rate both backends default to (and we
-// follow suit). See NOTES-audio-io.md.
-const SampleRate = 44100
+// SampleRate is the audio rate every backend is run at: the router's.
+const SampleRate = audio.SampleRate
 
 // BytesPerSample for mono signed-16-bit PCM.
 const BytesPerSample = 2

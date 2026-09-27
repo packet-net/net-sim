@@ -1,6 +1,6 @@
 # Plan: a physical FM channel model, and a 48 kHz router
 
-Status: proposed, 2026-09-27. Nothing here is built yet.
+Status: approved 2026-09-27, in progress on branch feat/fm-channel. Decisions are at the end.
 
 ## Summary
 
@@ -152,9 +152,9 @@ Each is one PR with one reviewer.
 
 Rough size: step 1 is about a day; steps 2 to 4 are several days, most of it in validation.
 
-## Decisions needed
+## Decisions (Tom, 2026-09-27)
 
-1. Port to Go with conformance tests (A, recommended) or extend and call M0LTE.FmChannel (B).
-2. Keep `simple` as the default until the FM model is calibrated (recommended), or switch straight away.
-3. Ship the 48 kHz change first as its own release (recommended).
-4. Whether real bench measurements are wanted beyond radio1's existing captures, for example a SINAD or capture measurement on radio1 and radio2 with a step attenuator, which would make items 3 and 5 a comparison with your own radios rather than with datasheets.
+1. Port the stages to Go, pinned to M0LTE.FmChannel by conformance tests (option A).
+2. Replace the old model outright. There is no `channel_model` switch: `loss_db`, `capture_db`, `collision_mode`, `noise_db` and `default_noise_db` are refused with a message saying what replaces them, and the example configs are rewritten.
+3. Move to 48 kHz first, but don't release it separately; carry straight on.
+4. Validate against datasheets (Tait TM8100/TM8200 manuals) and radio1's existing measurements. No new bench measurements.

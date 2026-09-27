@@ -29,8 +29,8 @@ import (
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 // handleAudio: GET /api/audio?port=<node>.<port>&side=tx|rx
-// Upgrades to WebSocket and streams raw 44.1 kHz int16 LE PCM as one
-// binary frame per audio block (882 bytes).
+// Upgrades to WebSocket and streams raw 48 kHz int16 LE PCM as one
+// binary frame per audio block (960 bytes).
 func (a *app) handleAudio(w http.ResponseWriter, r *http.Request) {
 	port := r.URL.Query().Get("port")
 	side := r.URL.Query().Get("side")
