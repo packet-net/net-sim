@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 
 	"gopkg.in/yaml.v3"
 )
@@ -26,6 +27,18 @@ const (
 	ModeBPSK     Mode = "bpsk"
 	ModeIL2P     Mode = "il2p"
 )
+
+// pdnModeName is the shape of a pdn-soundmodem mode name (qpsk3600,
+// fsk9600-il2p, ofdm-fm-8k, ...). Only ports with tnc: pdn accept modes
+// outside net-sim's own catalogue; the name is passed through verbatim and
+// pdn-soundmodem itself decides whether it is real (the tnc package checks
+// it against the binary's mode list before starting anything).
+var pdnModeName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+// idPattern is what node and port ids may contain. They end up in file
+// names (TNC configs, FIFOs, recordings), so no path separators or "..";
+// and in "node.port" link references, so no dots.
+var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // Modem is the per-port modem configuration. It is opaque to the router
 // except for cross-link compatibility validation; the router translates it
@@ -79,10 +92,12 @@ type Port struct {
 	KissPort int    `yaml:"kiss_port"`
 
 	// TNC selects the TNC backend that runs this port.
-	// "samoyed" (default) or "direwolf". Both backends speak the same
-	// modem flags; they differ in how the router gets TX audio out
-	// (samoyed → UDP, direwolf → ALSA file-plugin into a FIFO,
-	// because stock Dire Wolf still has no UDP audio out).
+	// "samoyed" (default), "direwolf" or "pdn". samoyed and direwolf
+	// speak the same modem flags; they differ in how the router gets TX
+	// audio out (samoyed -> UDP, direwolf -> ALSA file-plugin into a FIFO,
+	// because stock Dire Wolf still has no UDP audio out). "pdn" runs
+	// pdn-soundmodem on its pipe: audio device and also accepts that
+	// modem's own mode names (qpsk3600, c4fsk9600, ofdm-fm-8k, ...).
 	TNC TNCBackend `yaml:"tnc,omitempty"`
 
 	// NoiseDB overrides the global DefaultNoiseDB for this port's
@@ -99,6 +114,7 @@ type TNCBackend string
 const (
 	TNCSamoyed  TNCBackend = "samoyed"
 	TNCDirewolf TNCBackend = "direwolf"
+	TNCPdn      TNCBackend = "pdn"
 )
 
 // Node is a logical station — one or more ports under one identity.
@@ -276,6 +292,9 @@ func (c *Config) Validate() error {
 		if n.ID == "" {
 			return fmt.Errorf("config: node #%d has empty id", ni)
 		}
+		if !idPattern.MatchString(n.ID) {
+			return fmt.Errorf("config: node id %q may only contain letters, digits, '_' and '-'", n.ID)
+		}
 		if nodeIDs[n.ID] {
 			return fmt.Errorf("config: duplicate node id %q", n.ID)
 		}
@@ -287,6 +306,9 @@ func (c *Config) Validate() error {
 		for pi, p := range n.Ports {
 			if p.ID == "" {
 				return fmt.Errorf("config: node %q port #%d has empty id", n.ID, pi)
+			}
+			if !idPattern.MatchString(p.ID) {
+				return fmt.Errorf("config: node %q port id %q may only contain letters, digits, '_' and '-'", n.ID, p.ID)
 			}
 			if seenPort[p.ID] {
 				return fmt.Errorf("config: node %q has duplicate port id %q", n.ID, p.ID)
@@ -300,13 +322,20 @@ func (c *Config) Validate() error {
 			}
 			usedKissPorts[p.KissPort] = n.ID + "." + p.ID
 
-			if err := validateModem(p.Modem); err != nil {
-				return fmt.Errorf("config: %s.%s modem: %w", n.ID, p.ID, err)
-			}
 			switch p.TNC {
 			case "", TNCSamoyed, TNCDirewolf:
+			case TNCPdn:
+				// pdn-soundmodem's pipe device paces its capture side to
+				// the wall clock, so a router running N x faster would
+				// pile audio up in the FIFO without bound.
+				if c.TimeScale > 1 {
+					return fmt.Errorf("config: %s.%s: tnc pdn needs time_scale 1 (pdn-soundmodem reads its audio in real time), got %g", n.ID, p.ID, c.TimeScale)
+				}
 			default:
-				return fmt.Errorf("config: %s.%s: unknown tnc %q (must be samoyed|direwolf)", n.ID, p.ID, p.TNC)
+				return fmt.Errorf("config: %s.%s: unknown tnc %q (must be samoyed|direwolf|pdn)", n.ID, p.ID, p.TNC)
+			}
+			if err := validateModem(p.TNC, p.Modem); err != nil {
+				return fmt.Errorf("config: %s.%s modem: %w", n.ID, p.ID, err)
 			}
 			portMap[PortRef{n.ID, p.ID}] = slot{ni, pi}
 		}
@@ -367,7 +396,8 @@ func parsePortRef(s string) (PortRef, error) {
 	return PortRef{}, errors.New("expected node.port")
 }
 
-func validateModem(m Modem) error {
+func validateModem(tnc TNCBackend, m Modem) error {
+	pdn := tnc == TNCPdn
 	switch m.Mode {
 	case ModeAFSK1200:
 		if m.Inner != "" || m.FEC != "" || m.Baud != 0 || m.CarrierHz != 0 {
@@ -378,6 +408,9 @@ func validateModem(m Modem) error {
 			return errors.New("gfsk9600 takes no extra params")
 		}
 	case ModeIL2P:
+		if pdn {
+			return errors.New("il2p is a samoyed/direwolf mode; with tnc pdn use pdn-soundmodem's own names, e.g. afsk1200-il2p-nocrc (plain IL2P) or afsk1200-il2p (IL2P+CRC)")
+		}
 		if m.Inner == "" {
 			return errors.New("il2p requires inner")
 		}
@@ -395,6 +428,9 @@ func validateModem(m Modem) error {
 			return errors.New("il2p takes only inner and fec")
 		}
 	case ModeBPSK:
+		if pdn {
+			return errors.New("bpsk is a placeholder mode; with tnc pdn use pdn-soundmodem's own names, e.g. bpsk300 or bpsk1200")
+		}
 		if m.Baud == 0 {
 			return errors.New("bpsk requires baud")
 		}
@@ -404,7 +440,18 @@ func validateModem(m Modem) error {
 	case "":
 		return errors.New("missing mode")
 	default:
-		return fmt.Errorf("unknown mode %q", m.Mode)
+		if !pdn {
+			return fmt.Errorf("unknown mode %q (modes beyond afsk1200, gfsk9600 and il2p need tnc: pdn)", m.Mode)
+		}
+		if !pdnModeName.MatchString(string(m.Mode)) {
+			return fmt.Errorf("%q is not a pdn-soundmodem mode name (lower-case letters, digits and hyphens)", m.Mode)
+		}
+		if m.Mode == "ardop" {
+			return errors.New("ardop is a virtual TNC with its own host ports, not a KISS modem; net-sim can't run it")
+		}
+		if m.Inner != "" || m.FEC != "" || m.Baud != 0 || m.CarrierHz != 0 {
+			return fmt.Errorf("%s takes no extra params (pdn-soundmodem modes are fully named by mode)", m.Mode)
+		}
 	}
 	return nil
 }

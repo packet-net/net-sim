@@ -306,3 +306,77 @@ links: []
 		t.Fatalf("expected ok, got %v", err)
 	}
 }
+
+func TestPdnBackend(t *testing.T) {
+	cfg := func(tnc, mode, extra string) string {
+		return `
+` + extra + `
+nodes:
+  - id: a
+    ports:
+      - { id: fm, tnc: ` + tnc + `, modem: { mode: ` + mode + ` }, kiss_port: 8001 }
+  - id: b
+    ports:
+      - { id: fm, tnc: ` + tnc + `, modem: { mode: ` + mode + ` }, kiss_port: 8002 }
+links:
+  - { from: a.fm, to: b.fm, loss_db: 0 }
+`
+	}
+	for _, c := range []struct {
+		name, tnc, mode, extra, wantErr string
+	}{
+		{name: "pdn mode on pdn", tnc: "pdn", mode: "qpsk3600"},
+		{name: "shared mode on pdn", tnc: "pdn", mode: "afsk1200"},
+		{name: "pdn mode on samoyed", tnc: "samoyed", mode: "qpsk3600", wantErr: "need tnc: pdn"},
+		{name: "il2p on pdn", tnc: "pdn", mode: "il2p", wantErr: "afsk1200-il2p-nocrc"},
+		{name: "bad mode name", tnc: "pdn", mode: "'Q PSK'", wantErr: "not a pdn-soundmodem mode name"},
+		{name: "plugin mode", tnc: "pdn", mode: "'x:y'", wantErr: "not a pdn-soundmodem mode name"},
+		{name: "ardop", tnc: "pdn", mode: "ardop", wantErr: "virtual TNC"},
+		{name: "scaled time", tnc: "pdn", mode: "qpsk3600", extra: "time_scale: 2", wantErr: "time_scale 1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Parse(strings.NewReader(cfg(c.tnc, c.mode, c.extra)))
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("want error containing %q, got %v", c.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestPdnModeMismatchAcrossLink(t *testing.T) {
+	yaml := `
+nodes:
+  - id: a
+    ports:
+      - { id: fm, tnc: pdn, modem: { mode: qpsk3600 }, kiss_port: 8001 }
+  - id: b
+    ports:
+      - { id: fm, tnc: pdn, modem: { mode: c4fsk9600 }, kiss_port: 8002 }
+links:
+  - { from: a.fm, to: b.fm, loss_db: 0 }
+`
+	if _, err := Parse(strings.NewReader(yaml)); err == nil || !strings.Contains(err.Error(), "modem mismatch") {
+		t.Fatalf("want modem mismatch, got %v", err)
+	}
+}
+
+func TestIDsRejectPathsAndDots(t *testing.T) {
+	for _, id := range []string{"x/../../escaped", "a.b", "with space"} {
+		yaml := `
+nodes:
+  - id: "` + id + `"
+    ports:
+      - { id: vhf, modem: { mode: afsk1200 }, kiss_port: 8001 }
+links: []
+`
+		if _, err := Parse(strings.NewReader(yaml)); err == nil || !strings.Contains(err.Error(), "may only contain") {
+			t.Errorf("node id %q: want rejection, got %v", id, err)
+		}
+	}
+}

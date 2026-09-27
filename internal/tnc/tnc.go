@@ -7,6 +7,9 @@
 //   - "direwolf": stock Dire Wolf (apt install direwolf). Audio in via
 //     stdin, audio out via an ALSA "file" plugin writing to a FIFO
 //     because stock Dire Wolf 1.8 still doesn't support UDP audio out.
+//   - "pdn": pdn-soundmodem (https://github.com/packet-net/pdn-soundmodem)
+//     on its pipe: device, two FIFOs of 48 kHz float samples. Adds the
+//     modes samoyed doesn't have (qpsk3600, c4fsk, OFDM-FM, ...).
 //
 // The router treats each child as a black box exposing:
 //   - a stdin Writer where the router pushes RX audio (PCM samples)
@@ -38,6 +41,7 @@ type Backend string
 const (
 	BackendSamoyed  Backend = "samoyed"
 	BackendDirewolf Backend = "direwolf"
+	BackendPdn      Backend = "pdn"
 )
 
 // Spec is everything a Child needs to launch.
@@ -53,6 +57,7 @@ type Spec struct {
 
 	SamoyedBin  string // path to samoyed-direwolf
 	DirewolfBin string // path to direwolf
+	PdnBin      string // path to pdn-soundmodem
 	WorkDir     string // scratch dir for per-port config files (and FIFOs, for direwolf)
 
 	// StderrTap, if non-nil, also receives the TNC's stdout/stderr
@@ -75,8 +80,9 @@ type Child struct {
 	// own (close UDP listener, close + remove FIFO, etc.).
 	cleanups []func() error
 
-	mu    sync.Mutex
-	exitC chan error
+	mu     sync.Mutex
+	exitC  chan error
+	exited chan struct{} // closed once the process has exited
 }
 
 // Stdin returns the writer carrying RX audio into the TNC.
@@ -103,7 +109,7 @@ func (c *Child) Pid() int {
 func (c *Child) Wait() error { return <-c.exitC }
 
 // Done returns a channel that is closed when the child exits.
-func (c *Child) Done() <-chan error { return c.exitC }
+func (c *Child) Done() <-chan struct{} { return c.exited }
 
 // Stop kills the child and runs registered cleanups. Idempotent.
 func (c *Child) Stop() error {
@@ -126,7 +132,7 @@ func (c *Child) Stop() error {
 // Start launches a child using the configured backend. Defaults to
 // samoyed if Backend is empty.
 func Start(ctx context.Context, s Spec) (*Child, error) {
-	if err := SupportedMode(s.Modem); err != nil {
+	if err := SupportedMode(s.Backend, s.Modem); err != nil {
 		return nil, err
 	}
 	switch s.Backend {
@@ -134,15 +140,37 @@ func Start(ctx context.Context, s Spec) (*Child, error) {
 		return startSamoyed(ctx, s)
 	case BackendDirewolf:
 		return startDirewolf(ctx, s)
+	case BackendPdn:
+		return startPdn(ctx, s)
 	default:
 		return nil, fmt.Errorf("unknown tnc backend %q", s.Backend)
 	}
 }
 
+// watch starts the goroutine that reaps the process and records its exit.
+func (c *Child) watch() {
+	c.exitC = make(chan error, 1)
+	c.exited = make(chan struct{})
+	go func() {
+		err := c.cmd.Wait()
+		c.exitC <- err
+		close(c.exited)
+	}()
+}
+
 // SupportedMode reports whether the modem mode can run on the TNC.
-// Both backends share the same modem flags, so the answer is the same
-// for samoyed and direwolf.
-func SupportedMode(m config.Modem) error {
+// samoyed and direwolf share the same modem flags, so the answer is the
+// same for both. pdn-soundmodem modes are checked against the binary's own
+// mode list when the port starts (see startPdn), since that list moves with
+// pdn releases.
+func SupportedMode(b Backend, m config.Modem) error {
+	if b == BackendPdn {
+		switch m.Mode {
+		case config.ModeIL2P, config.ModeBPSK:
+			return fmt.Errorf("%s is not a pdn-soundmodem mode name", m.Mode)
+		}
+		return nil
+	}
 	switch m.Mode {
 	case config.ModeAFSK1200, config.ModeGFSK9600:
 		return nil

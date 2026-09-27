@@ -10,18 +10,17 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
 
 	"github.com/packethacking/net-sim/internal/config"
 	"github.com/packethacking/net-sim/internal/router"
+	"github.com/packethacking/net-sim/internal/tnc"
 )
 
 func main() {
@@ -29,6 +28,7 @@ func main() {
 	verbose := flag.Bool("v", false, "verbose / debug logging")
 	samoyedPath := flag.String("samoyed", "", "path to samoyed-direwolf (default: search $PATH and common install paths)")
 	direwolfPath := flag.String("direwolf", "", "path to direwolf (default: search $PATH)")
+	pdnPath := flag.String("pdn", "", "path to pdn-soundmodem (default: search $PATH and /usr/bin)")
 	workDir := flag.String("workdir", "", "scratch dir for per-port config files / FIFOs (default: a unique subdir of $TMPDIR)")
 	recordDir := flag.String("record", "", "if set, record all per-port TX and RX audio to a timestamped subdirectory of this path")
 	composite := flag.String("composite", "", "comma-separated transmitter ports (e.g. a.vhf,b.vhf) to composite into one real-time, sample-aligned WAV (one TX per channel — stereo for two). Requires -record for the output dir")
@@ -70,6 +70,11 @@ func main() {
 			os.Exit(2)
 		}
 		cfg.TimeScale = *timeScale
+		// Re-validate: some backends (tnc: pdn) can't run scaled.
+		if err := cfg.Validate(); err != nil {
+			logger.Error("-time-scale", "err", err)
+			os.Exit(2)
+		}
 	}
 	if cfg.TimeScale > 1 {
 		// Accelerated-testing mode, not a calibrated CSMA simulation: the
@@ -78,18 +83,32 @@ func main() {
 		logger.Warn("time_scale active — TNC CSMA timing does not scale; hosts must scale their own protocol timers", "time_scale", cfg.TimeScale)
 	}
 
-	samoyedBin, samoyedErr := resolveSamoyed(*samoyedPath)
-	direwolfBin, direwolfErr := resolveDirewolf(*direwolfPath)
 	// Each backend is only required if at least one port uses it; defer
-	// the strict check to router.Start, but warn now so the operator
-	// notices missing binaries before sending KISS frames at a port that
-	// can't actually start.
-	if samoyedErr != nil {
-		logger.Warn("samoyed-direwolf not found; ports with tnc=samoyed (the default) won't start", "err", samoyedErr)
+	// the strict check to router.Start, but warn now about any backend
+	// this topology uses whose binary can't be found.
+	used := map[tnc.Backend]bool{}
+	for _, n := range cfg.Nodes {
+		for _, p := range n.Ports {
+			b := tnc.Backend(p.TNC)
+			if b == "" {
+				b = tnc.BackendSamoyed
+			}
+			used[b] = true
+		}
 	}
-	if direwolfErr != nil {
-		logger.Warn("direwolf not found; ports with tnc=direwolf won't start", "err", direwolfErr)
+	bins := map[tnc.Backend]string{}
+	for b, explicit := range map[tnc.Backend]string{
+		tnc.BackendSamoyed:  *samoyedPath,
+		tnc.BackendDirewolf: *direwolfPath,
+		tnc.BackendPdn:      *pdnPath,
+	} {
+		bin, err := tnc.ResolveBinary(b, explicit)
+		if err != nil && used[b] {
+			logger.Warn(tnc.BinaryName(b)+" not found; ports with tnc="+string(b)+" won't start", "err", err)
+		}
+		bins[b] = bin
 	}
+	samoyedBin, direwolfBin, pdnBin := bins[tnc.BackendSamoyed], bins[tnc.BackendDirewolf], bins[tnc.BackendPdn]
 
 	wd, err := resolveWorkDir(*workDir)
 	if err != nil {
@@ -97,7 +116,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("starting", "config", *cfgPath, "samoyed", samoyedBin, "direwolf", direwolfBin, "workdir", wd)
+	logger.Info("starting", "config", *cfgPath, "samoyed", samoyedBin, "direwolf", direwolfBin, "pdn", pdnBin, "workdir", wd)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -105,6 +124,7 @@ func main() {
 	r, err := router.Start(ctx, cfg, router.Options{
 		SamoyedBin:    samoyedBin,
 		DirewolfBin:   direwolfBin,
+		PdnBin:        pdnBin,
 		WorkDir:       wd,
 		Verbose:       *verbose,
 		Logger:        logger,
@@ -136,49 +156,12 @@ func main() {
 		cancel()
 	}()
 
-	r.Wait()
+	// Wait for the router to stop, not for its goroutines: they only
+	// finish once Stop closes the children's audio sockets and FIFOs.
+	<-r.Done()
 	if err := r.Stop(); err != nil {
 		logger.Error("stop", "err", err)
 	}
-}
-
-func resolveSamoyed(explicit string) (string, error) {
-	if explicit != "" {
-		if _, err := os.Stat(explicit); err != nil {
-			return "", err
-		}
-		return explicit, nil
-	}
-	if p, err := exec.LookPath("samoyed-direwolf"); err == nil {
-		return p, nil
-	}
-	for _, p := range []string{
-		"/opt/samoyed/dist/samoyed-direwolf",
-		"/usr/local/bin/samoyed-direwolf",
-	} {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-	}
-	return "", errors.New("samoyed-direwolf not found in $PATH or common locations")
-}
-
-func resolveDirewolf(explicit string) (string, error) {
-	if explicit != "" {
-		if _, err := os.Stat(explicit); err != nil {
-			return "", err
-		}
-		return explicit, nil
-	}
-	if p, err := exec.LookPath("direwolf"); err == nil {
-		return p, nil
-	}
-	for _, p := range []string{"/usr/bin/direwolf", "/usr/local/bin/direwolf"} {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-	}
-	return "", errors.New("direwolf not found in $PATH or common locations")
 }
 
 // parseCompositePorts turns a comma-separated "a.vhf,b.vhf" list into

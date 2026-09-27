@@ -16,7 +16,7 @@ GOFLAGS   ?=
 .PHONY: build test fmt vet clean web \
         demo-hidden-node demo-hidden-node-capture demo-mesh-3 \
         demo-linear-6 demo-star-6 demo-multiport-3 demo-two-node \
-        demo-two-node-noisy install
+        demo-two-node-noisy demo-pdn-fm-modes install
 
 build: sim-router sim-web
 
@@ -100,3 +100,8 @@ demo-multiport-3: build
 	@echo "  a (8001) reaches middle via VHF, b (8004) via UHF."
 	@echo "  middle's two ports do not interact (different radios)."
 	$(call DEMO_RUN,multiport-3)
+
+demo-pdn-fm-modes: build
+	@echo "pdn-soundmodem FM modes (needs pdn-soundmodem and samoyed):"
+	@echo "  qpsk3600 a=8001 b=8002  c4fsk9600 c=8003 d=8004  afsk1200 pdn e=8005 samoyed f=8006"
+	$(call DEMO_RUN,pdn-fm-modes)

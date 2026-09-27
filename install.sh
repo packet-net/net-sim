@@ -29,6 +29,7 @@ SAMOYED_DIR="${SAMOYED_DIR:-/opt/samoyed}"
 WEB_PORT="${WEB_PORT:-8080}"
 NETWORK_YAML="${NETWORK_YAML:-/etc/sim/network.yaml}"
 SYSTEMD="${SYSTEMD:-1}"   # set to 0 to skip the sim-web systemd unit
+PDN="${PDN:-1}"           # set to 0 to skip pdn-soundmodem (the tnc: pdn backend)
 
 step() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 note() { printf '   %s\n' "$*"; }
@@ -75,6 +76,30 @@ note "samoyed: $(git -C "$SAMOYED_DIR" rev-parse --short HEAD)"
 step "Building samoyed"
 make -C "$SAMOYED_DIR" cmds >/dev/null
 note "built: $SAMOYED_DIR/dist/samoyed-direwolf"
+
+if [ "$PDN" = "1" ]; then
+    step "Installing pdn-soundmodem from the packet-net apt repository"
+    had_pdn=0
+    dpkg -s pdn-soundmodem >/dev/null 2>&1 && had_pdn=1
+    if [ ! -e /usr/share/keyrings/packet-net.gpg ]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gpg
+        curl -fsSL https://packet-net.github.io/apt/pubkey.asc | gpg --dearmor -o /usr/share/keyrings/packet-net.gpg
+    fi
+    echo "deb [signed-by=/usr/share/keyrings/packet-net.gpg] https://packet-net.github.io/apt ./" \
+        > /etc/apt/sources.list.d/packet-net.list
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pdn-soundmodem
+    note "$(pdn-soundmodem --version)"
+    # The package enables its own station service, which would fail here
+    # (no sound card configured) and isn't wanted: net-sim runs its own
+    # pdn-soundmodem per port. Only switched off if we just installed it.
+    if [ "$had_pdn" = "0" ] && [ -d /run/systemd/system ]; then
+        systemctl disable --now pdn-soundmodem.service >/dev/null 2>&1 || true
+        note "disabled the pdn-soundmodem station service (net-sim starts its own)"
+    fi
+else
+    note "skipping pdn-soundmodem (PDN=0); ports with tnc: pdn won't start"
+fi
 
 step "Cloning / updating net-sim → $SIM_DIR"
 sync_repo "$SIM_DIR" "$SIM_REPO" "$SIM_REF"
