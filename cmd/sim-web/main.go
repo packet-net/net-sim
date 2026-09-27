@@ -42,10 +42,7 @@ import (
 //go:embed index.html map.html
 var assets embed.FS
 
-const defaultConfigYAML = `# Default two-node AFSK1200 network. Edit and click Apply.
-mixer_mode: fm_capture
-capture_db: 6.0
-collision_mode: silence
+const defaultConfigYAML = `# Default two-node AFSK1200 network over a strong FM link. Edit and click Apply.
 
 nodes:
   - id: a
@@ -60,8 +57,8 @@ nodes:
         kiss_port: 8002
 
 links:
-  - { from: a.vhf, to: b.vhf, loss_db: 0 }
-  - { from: b.vhf, to: a.vhf, loss_db: 0 }
+  - { from: a.vhf, to: b.vhf, path_loss_db: 120 }
+  - { from: b.vhf, to: a.vhf, path_loss_db: 120 }
 `
 
 func main() {

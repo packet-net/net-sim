@@ -1,9 +1,5 @@
 # Linear chain of 6 AFSK1200 stations: A — B — C — D — E — F.
 # Each station hears only its immediate neighbours.
-mixer_mode: fm_capture
-capture_db: 6.0
-collision_mode: silence
-
 nodes:
   - { id: a, ports: [{ id: vhf, modem: { mode: afsk1200 }, kiss_port: 8001 }] }
   - { id: b, ports: [{ id: vhf, modem: { mode: afsk1200 }, kiss_port: 8002 }] }
@@ -13,13 +9,13 @@ nodes:
   - { id: f, ports: [{ id: vhf, modem: { mode: afsk1200 }, kiss_port: 8006 }] }
 
 links:
-  - { from: a.vhf, to: b.vhf, loss_db: 0 }
-  - { from: b.vhf, to: a.vhf, loss_db: 0 }
-  - { from: b.vhf, to: c.vhf, loss_db: 0 }
-  - { from: c.vhf, to: b.vhf, loss_db: 0 }
-  - { from: c.vhf, to: d.vhf, loss_db: 0 }
-  - { from: d.vhf, to: c.vhf, loss_db: 0 }
-  - { from: d.vhf, to: e.vhf, loss_db: 0 }
-  - { from: e.vhf, to: d.vhf, loss_db: 0 }
-  - { from: e.vhf, to: f.vhf, loss_db: 0 }
-  - { from: f.vhf, to: e.vhf, loss_db: 0 }
+  - { from: a.vhf, to: b.vhf, path_loss_db: 120 }
+  - { from: b.vhf, to: a.vhf, path_loss_db: 120 }
+  - { from: b.vhf, to: c.vhf, path_loss_db: 120 }
+  - { from: c.vhf, to: b.vhf, path_loss_db: 120 }
+  - { from: c.vhf, to: d.vhf, path_loss_db: 120 }
+  - { from: d.vhf, to: c.vhf, path_loss_db: 120 }
+  - { from: d.vhf, to: e.vhf, path_loss_db: 120 }
+  - { from: e.vhf, to: d.vhf, path_loss_db: 120 }
+  - { from: e.vhf, to: f.vhf, path_loss_db: 120 }
+  - { from: f.vhf, to: e.vhf, path_loss_db: 120 }

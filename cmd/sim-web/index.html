@@ -78,7 +78,7 @@
   .ghost { color: var(--muted); font-style: italic; padding: .25rem 0; }
   .links-grid { display: grid;
                 grid-template-columns: minmax(8rem,max-content) 2rem minmax(8rem,max-content)
-                                       6rem 6rem max-content;
+                                       7rem max-content;
                 gap: .35rem .5rem; align-items: center;
                 justify-content: start; }
   .links-grid .h { color: var(--muted); font-size: .85em; padding-right: .5rem; }
@@ -208,8 +208,9 @@ const $ = id => document.getElementById(id);
 
 const MODES        = ["afsk1200", "gfsk9600", "il2p", "bpsk"];
 const IL2P_INNER   = ["afsk1200", "gfsk9600"];
-const MIXER_MODES  = ["fm_capture", "linear_sum"];
-const COLLISIONS   = ["silence", "sum", "noise"];
+const CHANNELS     = ["narrow", "mid", "wide"];
+const PATHS        = ["data", "voice"];
+const SQUELCHES    = ["open", "country", "city", "hard"];
 
 let topology = null;     // the JSON view of /etc/sim/network.yaml
 let activeTab = "form";
@@ -439,16 +440,24 @@ async function refreshStatus() {
 // Make sure topology has the keys the form expects so we never index undefined.
 function ensureShape(t) {
   t = t || {};
-  if (!t.mixer_mode)     t.mixer_mode = "fm_capture";
-  if (typeof t.capture_db !== "number") t.capture_db = 6.0;
-  if (!t.collision_mode) t.collision_mode = "silence";
+  // Keys from before the FM channel model: the simulator refuses them, so
+  // the form drops them. A link's path loss has no equivalent in the old
+  // loss_db, so an old link starts at a strong 120 dB.
+  for (const k of ["mixer_mode", "capture_db", "collision_mode", "default_noise_db"]) delete t[k];
+  if (typeof t.frequency_mhz !== "number") t.frequency_mhz = 145;
   if (!Array.isArray(t.nodes)) t.nodes = [];
   if (!Array.isArray(t.links)) t.links = [];
   for (const n of t.nodes) {
     if (!Array.isArray(n.ports)) n.ports = [];
     for (const p of n.ports) {
       if (!p.modem) p.modem = { mode: "afsk1200" };
+      if (!p.radio || typeof p.radio !== "object") p.radio = {};
+      delete p.noise_db;
     }
+  }
+  for (const l of t.links) {
+    if (typeof l.path_loss_db !== "number") l.path_loss_db = 120;
+    delete l.loss_db; delete l.noise_db; delete l.squelch_open_ms;
   }
   return t;
 }
@@ -457,14 +466,17 @@ function renderForm() {
   const root = $("form-root");
   root.innerHTML = "";
 
-  // ---- mixer settings ---------------------------------------------------
-  const mixer = mkBlock("Mixer settings");
-  mixer.body.appendChild(mkRow(
-    field("Mixer mode", select(MIXER_MODES, topology.mixer_mode, v => topology.mixer_mode = v)),
-    field("Capture dB", numInput(topology.capture_db, 0.5, v => topology.capture_db = v)),
-    field("Collision mode", select(COLLISIONS, topology.collision_mode, v => topology.collision_mode = v)),
+  // ---- channel settings -------------------------------------------------
+  const channel = mkBlock("Channel");
+  channel.body.appendChild(mkRow(
+    field("Frequency MHz", numInput(topology.frequency_mhz, 1, v => topology.frequency_mhz = v)),
   ));
-  root.appendChild(mixer.el);
+  const chNote = document.createElement("div");
+  chNote.className = "muted";
+  chNote.style.fontSize = ".85em";
+  chNote.textContent = "Every port is an FM radio (a Tait TM8100 by default). Links set the RF path loss: about 120 dB is a strong local link, 155 the edge for 1200 baud. More radio settings are in the YAML tab.";
+  channel.body.appendChild(chNote);
+  root.appendChild(channel.el);
 
   // ---- nodes ------------------------------------------------------------
   const nodesHead = document.createElement("h2");
@@ -503,7 +515,7 @@ function renderForm() {
     }
     topology.links.push({ from: portRefs[0],
                           to:   portRefs[Math.min(1, portRefs.length-1)],
-                          loss_db: 0, noise_db: 0 });
+                          path_loss_db: 120 });
     renderForm();
   }, portRefs.length === 0));
 }
@@ -600,14 +612,25 @@ function renderPort(node, ni, port, pi) {
       }
       title.textContent = "Port " + (v || "?") + "  (" + port.modem.mode + ")";
     })),
-    field("TNC", select(["samoyed","direwolf"], port.tnc || "samoyed", v => {
+    field("TNC", select(["samoyed","direwolf","pdn"], port.tnc || "samoyed", v => {
       port.tnc = v;
-    })),
-    field("Modem", select(MODES, port.modem.mode, v => {
-      port.modem = defaultModem(v);
       renderForm();
     })),
+    port.tnc === "pdn"
+      // pdn-soundmodem takes any of its own mode names (qpsk3600, ...).
+      ? field("Modem", textInput(port.modem.mode, "small", v => { port.modem = { mode: v }; }))
+      : field("Modem", select(MODES, port.modem.mode, v => {
+          port.modem = defaultModem(v);
+          renderForm();
+        })),
     field("KISS port", numInput(port.kiss_port, 1, v => port.kiss_port = v|0)),
+  ));
+  body.appendChild(mkRow(
+    field("Channel", select(CHANNELS, port.radio.channel || "narrow", v => port.radio.channel = v)),
+    field("Radio path", select(PATHS, port.radio.path || "data", v => port.radio.path = v)),
+    field("Squelch", select(SQUELCHES,
+      typeof port.radio.squelch === "string" ? port.radio.squelch : "open",
+      v => { if (v === "open") delete port.radio.squelch; else port.radio.squelch = v; })),
   ));
 
   // mode-specific extras
@@ -638,7 +661,7 @@ function renderLinksGrid(portRefs) {
   grid.className = "links-grid";
 
   // header
-  for (const h of ["from","","to","loss dB","noise dB",""]) {
+  for (const h of ["from","","to","path loss dB",""]) {
     const c = document.createElement("div"); c.className = "h"; c.textContent = h; grid.appendChild(c);
   }
 
@@ -646,8 +669,7 @@ function renderLinksGrid(portRefs) {
     grid.appendChild(wrapInDiv(select(portRefs, link.from, v => link.from = v)));
     const arrow = document.createElement("div"); arrow.textContent = "→"; arrow.style.textAlign="center"; grid.appendChild(arrow);
     grid.appendChild(wrapInDiv(select(portRefs, link.to,   v => link.to   = v)));
-    grid.appendChild(wrapInDiv(numInput(link.loss_db,  0.5, v => link.loss_db  = v)));
-    grid.appendChild(wrapInDiv(numInput(link.noise_db || 0, 0.5, v => link.noise_db = v)));
+    grid.appendChild(wrapInDiv(numInput(link.path_loss_db, 1, v => link.path_loss_db = v)));
     const rm = document.createElement("button");
     rm.className = "icon"; rm.textContent = "remove"; rm.title = "remove this link";
     rm.onclick = () => { topology.links.splice(li, 1); renderForm(); };

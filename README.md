@@ -5,12 +5,15 @@ BPQ routing decisions, collision recovery and hidden-node interactions
 without real radios. Multiple
 [samoyed](https://github.com/doismellburning/samoyed) instances (or Dire Wolf,
 or [pdn-soundmodem](https://github.com/packet-net/pdn-soundmodem) for modes
-such as qpsk3600) act as TNC+radio combinations; an audio router (`sim-router`) implements per-link
-topology and FM capture-effect mixing between them.
+such as qpsk3600) act as TNCs; `sim-router` gives each one an FM radio and
+joins them over a physical FM channel: real frequency modulation, noise at
+each receiver, and a limiter and discriminator, so quieting, the threshold
+cliff, open-squelch hiss, capture and collisions happen the way they do on
+air.
 
-The primary target is **2m FM AX.25** behaviour. SSB and other modulation
-schemes are not modelled in v1. Real-radio quirks (TX rise time, RX
-recovery, mic AGC, pre/de-emphasis) are explicitly out of scope.
+The target is **2 m FM packet**. SSB is not modelled. The radios are built
+from the Tait TM8100/TM8200 datasheets; see [docs/fm-channel.md](docs/fm-channel.md)
+for the model, how it was checked, and where it falls short.
 
 ## Architecture
 
@@ -23,7 +26,7 @@ recovery, mic AGC, pre/de-emphasis) are explicitly out of scope.
  │  kissutil) │       │ • parses YAML topology    │    │  / nc /    │
  │            │       │ • spawns N samoyed kids   │    │  ax25d /   │
  │            │       │ • routes audio per link   │    │  ...)      │
- │            │       │ • FM capture mixer per RX │    │            │
+ │            │       │ • an FM radio per port    │    │            │
  └────────────┘       └─────────────┬─────────────┘    └────────────┘
        ▲                            │                          ▲
        │            stdin (RX PCM)  │  UDP (TX PCM)            │
@@ -36,9 +39,10 @@ recovery, mic AGC, pre/de-emphasis) are explicitly out of scope.
                       └─────────────────────────┘
 ```
 
-The router is **DSP-unaware**: each samoyed child does all modulation /
-demodulation; the router moves opaque PCM bytes between them and applies
-attenuation, the FM-capture mixing decision, and optional white noise.
+The TNCs do all the modem work. The router is the radios and the air
+between them: each port's transmit audio is frequency-modulated onto a
+carrier, and each receiving port hears the sum of the carriers reaching it,
+at their received levels, plus its own noise, through its radio's receiver.
 
 The audio path is entirely userspace (`stdin` for RX, UDP datagrams for TX
 between samoyed and the router). No PulseAudio, PipeWire, JACK, or
@@ -217,8 +221,8 @@ router doesn't touch KISS frames, samoyed handles them natively.
 | Target | What it shows |
 |---|---|
 | `make demo-two-node` | Single bidirectional AFSK1200 link. Sanity check. |
-| `make demo-two-node-noisy` | Same plus deliberate path loss and noise — Phase 4: FER climbs visibly. |
-| `make demo-hidden-node` | A↔B, B↔C, no A↔C; equal loss. Simultaneous TX from A and C produces collision at B. |
+| `make demo-two-node-noisy` | The same pair at the edge of range: about half the frames get through. |
+| `make demo-hidden-node` | A-B, B-C, no A-C; equal path loss. Simultaneous TX from A and C collides at B. |
 | `make demo-hidden-node-capture` | Same topology, A loud / C quiet. A captures the demodulator at B; C is suppressed. |
 | `make demo-mesh-3` | Three-node fully connected mesh. |
 | `make demo-linear-6` | A — B — C — D — E — F chain, each hears only immediate neighbours. |
@@ -230,9 +234,7 @@ Each demo prints its KISS port assignments at startup.
 ## YAML config
 
 ```yaml
-mixer_mode: fm_capture        # fm_capture (default) | linear_sum (stub)
-capture_db: 6.0               # FM capture ratio (default 6; 0 = strongest always captures)
-collision_mode: silence       # silence (default) | noise (FM garble) | sum (stub)
+frequency_mhz: 145            # the band; sets how much man-made noise each site adds (default 145)
 time_scale: 1.0               # run N x faster than wall clock (1 to 100; see below)
 
 nodes:
@@ -244,29 +246,66 @@ nodes:
       - id: uhf-link
         modem: { mode: gfsk9600 }
         kiss_port: 8002
+        radio: { channel: wide }      # 9600 wants a 25 kHz channel
   - id: b
     ports:
       - id: vhf
         modem: { mode: afsk1200 }
         kiss_port: 8003
+        radio: { squelch: hard, site_noise: rural }
 
 links:
   # Directional. Both endpoints must use compatible modem configs.
-  - { from: a.vhf, to: b.vhf, loss_db: 0 }
-  - { from: b.vhf, to: a.vhf, loss_db: 0, squelch_open_ms: 50 }
+  - { from: a.vhf, to: b.vhf, path_loss_db: 140 }
+  - { from: b.vhf, to: a.vhf, path_loss_db: 140 }
 ```
 
-Per-link `squelch_open_ms` (optional, `0..500`, default `0`) models the
-receiving radio's squelch / carrier-detect opening delay: the first N ms
-of every transmission heard via that link are delivered as silence (the
-carrier is still on the air for capture/collision purposes — only the
-audio is muted while the squelch opens). Real FM receivers take tens of
-milliseconds to open squelch and settle the discriminator, which is
-exactly why KISS TXDELAY exists; with the default `0` a tiny TXDELAY
-looks fine in simulation when it wouldn't be on air.
+`path_loss_db` (required) is the RF path loss between the two radios. With
+the default radios (25 W, a residential site, a noise floor of about
+-120.8 dBm on a 12.5 kHz channel):
 
-Strict parsing: any unknown key inside a `modem:` block (e.g. `baud_rate`
-when you meant `baud`) is an error at startup, not a silent default.
+| `path_loss_db` | What you get at 1200 baud |
+|---|---|
+| 120 to 150 | A strong, fully quieted link |
+| 156 | The last dB or so of solid copy |
+| 157 to 158 | The edge: some frames, then none |
+| 159 and up | Below the FM threshold: nothing |
+
+Every port's `radio` block is optional. Its keys, with the defaults (a Tait
+TM8100/TM8200 from its datasheets):
+
+| Key | Default | What it is |
+|---|---|---|
+| `channel` | `narrow` | `narrow` (12.5 kHz, 2.5 kHz rated deviation), `mid` (20 kHz, 4 kHz) or `wide` (25 kHz, 5 kHz) |
+| `path` | `data` | `data`: the flat taps a data port gives, no emphasis, audio to half the IF bandwidth. `voice`: microphone and speaker, 300-3000 Hz, 750 us emphasis, a limiter at rated deviation |
+| `deviation_hz` | rated | Deviation from full-scale transmit audio (a full-scale 1 kHz tone on the voice path). A TNC that transmits quieter deviates less |
+| `limit_hz` | voice: rated | Transmit limiter ceiling; `0` (data path default) is none |
+| `tx_power_w` | 25 | Transmitter power |
+| `antenna_gain_dbi`, `feeder_loss_db` | 0 | Added to the link budget at both ends |
+| `noise_figure_db` | 6.0 / 5.3 / 5.4 | Receiver noise figure, fitted to Tait's -121 dBm sensitivity |
+| `site_noise` | `residential` | Man-made noise at the site (ITU-R P.372): `none`, `quiet_rural`, `rural`, `residential`, `business` |
+| `frequency_error_hz` | 0 | This radio's offset from the channel; Tait's spec is 1.5 ppm (about 220 Hz on 2 m) |
+| `rx_level_dbfs` | -18 | Receive audio level of a signal at rated deviation; the default puts open-squelch hiss at about -16 dBFS, as measured on a real radio |
+| `hum_noise_db` | 42 / 45.5 / 47.5 | Receiver hum and noise floor, from Tait's measured figures |
+| `squelch` | open | `open`, a Tait preset (`country` -115, `city` -113, `hard` -107 dBm), or `{ threshold_dbm, hysteresis_db, open_ms, close_ms }` |
+| `if_bandwidth_hz`, `audio_low_hz`, `audio_high_hz`, `emphasis_us` | from `channel` and `path` | Override the receive filter and audio path |
+
+Other things the radios do: a transmitting radio's own receiver is muted
+(half duplex); with the squelch open a receiver always hears hiss, louder
+than any data signal, which drops away when a carrier arrives; and a
+signal-strength squelch compares total received power (carriers plus
+noise) with its threshold, so a preset whose closing point sits under the
+site's noise floor opens on a signal and then never closes, as it wouldn't
+on a real radio.
+
+Configs from before the FM channel model used `loss_db`, `noise_db`,
+`default_noise_db`, `capture_db`, `collision_mode`, `mixer_mode` and
+`squelch_open_ms`. They are refused with a message saying what replaced
+each; there is no automatic conversion, because an audio attenuation has
+no single RF path loss equivalent.
+
+Strict parsing: any unknown key (e.g. `baud_rate` when you meant `baud`) is
+an error at startup, not a silent default.
 
 ### time_scale — faster-than-real-time simulation
 
@@ -275,7 +314,7 @@ when you meant `baud`) is an error at startup, not a silent default.
 > `time_scale > 1` the TNC transmits in real time while the channel runs N×
 > faster — TX throughput stays wall-clock-bound and ACKMODE echoes arrive N×
 > "late" relative to a host whose protocol timers are scaled to match. In
-> practice `time_scale` is currently only sound for receive-path/mixer
+> practice `time_scale` is currently only sound for receive-path
 > experiments; ACKMODE pacing or throughput measurements need `time_scale: 1`
 > until the TNC grows a matching speed factor (tracked upstream).
 >
@@ -373,16 +412,25 @@ Things to know:
 - Each port runs `pdn-soundmodem --device pipe:... --kiss PORT --modem 0:MODE`
   with no config file, so pdn defaults apply: TXDELAY 300 ms until the host
   sets it over KISS, and carrier sense from pdn's in-band energy detector.
-- With no radio to ask, pdn judges "channel busy" from the received audio.
-  With `default_noise_db` or `noise_db` set, a pdn station can hold its
-  transmissions for ten seconds or more after hearing traffic, including its
-  first one after start-up, and c4fsk modes miss frames. Don't read that as
-  what pdn does on air: the router's noise model gets an open-squelch FM
-  receiver's levels the wrong way round (see docs/fm-channel-plan.md). Leave
-  the noise off for protocol testing.
-- The channel is still the router's: flat audio, no FM pre-emphasis or radio
-  filtering. Modes that are sensitive to a real FM audio path (pdn's docs
-  flag c4fsk over real radios) will look better here than on air.
+- Put each mode on the radio it belongs on: pdn's mode table gives the
+  deviation (qpsk3600 and c4fsk19200 are 5 kHz modes, so `channel: wide`;
+  c4fsk9600 is 2.5 kHz), and the OFDM-FM presets need audio up to their
+  span (`ofdm-fm-8k` needs a wide data port).
+- With the squelch open, which is how packet stations usually run, the
+  receiver hears loud hiss between transmissions and a quieter signal
+  during them. pdn behaves on that as its own documentation says it does
+  on air without a control cable to the radio:
+  - its audio-only carrier sense can hold a transmission for about ten
+    seconds after hearing traffic;
+  - its c4fsk receiver misses frames (pdn issue #518);
+  - its qpsk receiver loses some frames too: it resets its frequency
+    tracker when the level rises at the start of a burst, and on an
+    open-squelch radio the level falls instead.
+
+  A closed squelch (`radio: { squelch: hard }`) avoids all three, as it
+  would on air. net-sim primes pdn's input with its radio's own hiss before
+  pdn starts, so a station doesn't start on silence the way no real one
+  does.
 
 ### Modem catalogue
 
@@ -419,9 +467,9 @@ sim-router -config configs/hidden-node.yaml -record /tmp/sim-rec
 For each port `<node>.<port>` you get two files:
 
 - `*.tx.wav` — exactly what the TNC keyed onto the air.
-- `*.rx.wav` — what the TNC's demodulator actually heard, post-mix:
-  silence, captured signal, collision (silence in v1), and any per-link
-  noise.
+- `*.rx.wav` - what the TNC heard: its radio's receive audio, hiss,
+  signals, collisions and all (silence while its own radio transmits, or
+  while a closed squelch is shut).
 
 All `.rx.wav` files for a single run share a clock — they're sample-aligned,
 so loading them into Audacity as separate tracks shows you exactly which
@@ -476,9 +524,8 @@ time. Drop it into Audacity and you can see at a glance who was keying
 when — ideal for inspecting hidden-node collisions (put the two hidden
 stations in left/right).
 
-The audio is the clean transmitter output (full-scale, before any
-per-link path loss, noise, or the capture-effect mixer) — it's what each
-station actually put on the air, not what any particular receiver heard.
+The audio is each TNC's transmit audio, before its radio and the channel:
+what each station put on the air, not what any particular receiver heard.
 
 **`sim-router`** — pass `-composite a.vhf,b.vhf` together with `-record DIR`
 (the base dir for the output). Recording starts as soon as the router
@@ -515,48 +562,25 @@ A typical external run: `POST .../start` → exercise your stations over
 KISS → `POST .../stop` → `GET .../download`. The `composite` block is
 also included in `GET /api/status`.
 
-## Why FM capture-effect mixing (and not linear sum)
+## The FM channel
 
-A linear-sum mixer is simpler and is what most "audio bus" libraries
-default to. It is also wrong for the dominant use case of this rig.
+Each port is an FM radio. Its transmitter frequency-modulates the TNC's
+audio; each receiver adds its own noise to the carriers that reach it,
+filters to its IF bandwidth and demodulates with a limiter and
+discriminator. Nothing decides who captures, or what a collision sounds
+like: that is what the receiver does with the signals in front of it.
 
-Real FM receivers exhibit the **capture effect**: when two FM signals
-arrive simultaneously, the stronger one takes over the demodulator and
-the weaker is suppressed, *provided* the level difference exceeds a
-threshold (the "capture ratio", typically ~6 dB on narrow-band 2m FM).
-This is why hidden-node collisions on 2 m packet are *intermittent*
-rather than universal: a stronger station regularly punches through.
-
-`sim-router` implements receiver-side capture-effect mixing per port:
-
-```
-for each rx block per receiving port:
-  active := list of TX streams reaching this port right now
-  if len(active) == 0: silence
-  if len(active) == 1: that stream, attenuated per loss_db
-  if len(active) >= 2:
-    sort by RX level; margin = strongest − next
-    if margin >= capture_db:  output strongest, attenuated  (capture)
-    else:                     collision garbage              (per collision_mode)
-```
-
-This is what makes the `hidden-node` and `hidden-node-capture` demos do
-qualitatively different things from the same code.
-
-What "collision garbage" sounds like is selectable via `collision_mode`:
-
-- `silence` (default) — clean digital silence. Simple and backwards
-  compatible, but unrealistically *clean*: it hands receiving modems a
-  perfectly quiet channel at exactly the moment a real one would be full
-  of noise.
-- `noise` — gaussian garble at an RMS matching the strongest colliding
-  signal's post-loss level. A real FM discriminator outputs loud garble
-  (the heterodyne beat between the carriers plus wideband noise) when
-  two comparable carriers collide, at signal-comparable amplitude — so a
-  hot collision is loud garble, a weak distant one quiet garble. Use
-  this to exercise modem false-sync / DCD behaviour that the silence
-  model can't.
-- `sum` — accepted but still a stub (behaves as silence).
+The model is a Go port of
+[M0LTE.FmChannel](https://github.com/M0LTE/M0LTE.FmChannel), the FM link
+pdn-soundmodem measures its modes through, made to run continuously with
+several carriers per receiver. Tests hold it to that package's output. The
+radios come from Tait's TM8100/TM8200 datasheets, and against measurement
+it reproduces a real radio's open-squelch levels (with the hiss level set
+to radio1's, a data signal and an unmodulated carrier land within 1 and 6
+dB of what radio1 measured), Tait's sensitivity and its co-channel
+rejection. It reaches 20 dB SINAD 3 to 6 dB
+sooner than a real Tait does. The details, and what isn't modelled, are in
+[docs/fm-channel.md](docs/fm-channel.md).
 
 ## Known limitations (samoyed-side, expected to be fixed upstream)
 
@@ -592,15 +616,11 @@ round-trip test lives in `internal/tnc/ackmode_test.go`.
 - BPQ / XRouter integration (works fine — point them at the KISS ports —
   but no demos shipped).
 - Hot reload of topology (restart the router).
-- Web UI / topology visualisation. Logs to stderr, that's the interface.
 - Playback / injection of recorded WAVs back into the router (recording
   to WAV is supported — see "Recording runs" below).
 - BER / FER reporting beyond the basic frame counters demonstrable from
   KISS sniffing.
-- SSB modelling, AGC, pre/de-emphasis, multipath, Doppler, fading.
-- `linear_sum` / `sum` mixer modes — accepted in the YAML, only
-  `fm_capture` is functional (`collision_mode: silence` and `noise` both
-  work; `sum` is a stub).
+- SSB, multipath, Doppler and fading, transmitter rise time, receiver AGC.
 - Modem modes beyond what samoyed and pdn-soundmodem support.
 
 ## Layout
@@ -611,11 +631,13 @@ cmd/sim-web/               - integrated web UI; embeds the router
 internal/config/           - YAML parsing + validation (strict)
 internal/tnc/              - per-port samoyed / direwolf / pdn-soundmodem process management
                              + the modem-mode → config-directive translation
-internal/audio/            - PCM types, FM-capture mixer, noise generator,
-                             WAV recorder
-internal/router/           - topology, audio routing, glue
+internal/audio/            - PCM types, WAV recorder, audio tap
+internal/fm/               - the FM channel: modulator, receiver, radios, link budget
+internal/router/           - topology, audio routing, the radios per port
+tools/fmref/               - makes internal/fm's reference vectors from M0LTE.FmChannel
 configs/                   - demo topology YAMLs
 install.sh                 - curl | sudo bash installer
 NOTES-audio-io.md          - Phase 1 findings (essential reading if you
                              want to understand why we use stdin + UDP)
+docs/fm-channel.md         - the FM channel model, its calibration and limits
 ```
