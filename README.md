@@ -377,12 +377,12 @@ Things to know:
   with no config file, so pdn defaults apply: TXDELAY 300 ms until the host
   sets it over KISS, and carrier sense from pdn's in-band energy detector.
 - With no radio to ask, pdn judges "channel busy" from the received audio.
-  With `default_noise_db` or `noise_db` set, the router models an
-  open-squelch receiver (hiss that drops under a signal), and pdn reads the
-  hiss coming back as a signal, just as it does on air: a station can hold
-  its transmissions for ten seconds or more after hearing traffic, including
-  its first one after start-up. c4fsk modes also miss frames on that
-  channel (pdn issue #518). Leave the noise off for plain protocol testing.
+  With `default_noise_db` or `noise_db` set, a pdn station can hold its
+  transmissions for ten seconds or more after hearing traffic, including its
+  first one after start-up, and c4fsk modes miss frames. Don't read that as
+  what pdn does on air: the router's noise model gets an open-squelch FM
+  receiver's levels the wrong way round (see docs/fm-channel-plan.md). Leave
+  the noise off for protocol testing.
 - The channel is still the router's: flat audio, no FM pre-emphasis or radio
   filtering. Modes that are sensitive to a real FM audio path (pdn's docs
   flag c4fsk over real radios) will look better here than on air.
