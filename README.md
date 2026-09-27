@@ -231,9 +231,9 @@ Each demo prints its KISS port assignments at startup.
 
 ```yaml
 mixer_mode: fm_capture        # fm_capture (default) | linear_sum (stub)
-capture_db: 6.0               # FM capture ratio
+capture_db: 6.0               # FM capture ratio (default 6; 0 = strongest always captures)
 collision_mode: silence       # silence (default) | noise (FM garble) | sum (stub)
-time_scale: 1.0               # run N x faster than wall clock (>= 1.0; see below)
+time_scale: 1.0               # run N x faster than wall clock (1 to 100; see below)
 
 nodes:
   - id: a
@@ -443,9 +443,15 @@ The toggle survives Apply &amp; restart, so you can edit the topology and
 keep recording across the restart with one click.
 
 **Disk usage**: ~88 KB/s per stream. A 6-node mesh with two streams per
-port ≈ 1 MB/s, ≈ 3.5 GB/hour. WAV size is capped by a 32-bit chunk-size
-field — at this rate a single file fills at ~13.5 hours. Long enough that
-v1 doesn't rotate; short enough to mention.
+port is about 1 MB/s, 3.5 GB/hour. WAV size is capped by a 32-bit
+chunk-size field: a mono file fills at about 13.5 hours and a stereo
+composite at about 6.8. A full file stops growing (with a warning) and
+stays valid; there is no rotation.
+
+Recording never holds up the simulation: each file has its own writer and
+a 10 s buffer. If the disk can't keep up, that file stops (with a warning)
+rather than stalling the audio or growing gaps that would break its
+alignment with the others.
 
 **Crash safety**: WAV headers are patched on `Close`. If the process is
 killed without a clean shutdown, the file is still readable as raw PCM

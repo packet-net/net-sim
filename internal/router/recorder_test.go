@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/packethacking/net-sim/internal/audio"
 	"github.com/packethacking/net-sim/internal/config"
@@ -151,5 +152,26 @@ func TestRouterStartRecordingRejectsNoBaseDir(t *testing.T) {
 	}
 	if _, err := r.StartRecording(); err == nil {
 		t.Error("StartRecording with empty RecordDir should error")
+	}
+}
+
+// A stream whose disk can't keep up is stopped, never blocks the caller.
+func TestStreamWriterNeverBlocks(t *testing.T) {
+	sw := &streamWriter{name: "slow.wav", ch: make(chan audio.Block, 1), done: make(chan struct{}), logger: quietLogger()}
+	// No run goroutine: nothing drains the queue, like a stalled disk.
+	finished := make(chan struct{})
+	go func() {
+		for i := 0; i < 5; i++ {
+			sw.write(audio.Silence())
+		}
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("write blocked on a full queue")
+	}
+	if !sw.dead.Load() {
+		t.Error("stream not stopped after its queue overflowed")
 	}
 }

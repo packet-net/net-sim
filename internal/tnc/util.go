@@ -61,6 +61,16 @@ func waitListening(ctx context.Context, port int, timeout time.Duration, exited 
 	}
 }
 
+// portFree reports an error if a TCP listener already holds port on any
+// local address.
+func portFree(port int) error {
+	l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return fmt.Errorf("kiss_port %d is already in use by another process", port)
+	}
+	return l.Close()
+}
+
 // prefixWriter writes each line with a "[label] " prefix, so a single
 // stderr stream from N TNCs is still readable.
 type prefixWriter struct {

@@ -2,8 +2,10 @@ package audio
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 )
 
@@ -22,6 +24,27 @@ type WAVWriter struct {
 }
 
 const wavHeaderBytes = 44
+
+// ErrWAVFull is returned once a WAV file reaches the format's 4 GiB limit
+// (a 32-bit size field). The file is left valid up to that point; at
+// 44.1 kHz mono that is about 13.5 hours, stereo about 6.8.
+var ErrWAVFull = errors.New("wav: file reached the 4 GiB WAV size limit")
+
+// maxWAVData is the largest data chunk whose RIFF size (36 + data) still
+// fits in 32 bits.
+const maxWAVData = math.MaxUint32 - 36
+
+// capWrite writes b to f unless that would take written past the WAV
+// limit, in which case it writes nothing and returns ErrWAVFull. frame is
+// the byte size of one sample frame, so a file is never cut mid-frame.
+func capWrite(f *os.File, written *uint32, b []byte, frame int) (int, error) {
+	if uint64(*written)+uint64(len(b)) > maxWAVData/uint64(frame)*uint64(frame) {
+		return 0, ErrWAVFull
+	}
+	n, err := f.Write(b)
+	*written += uint32(n)
+	return n, err
+}
 
 // NewWAVWriter creates path and writes the WAV header. The file is left
 // open and ready to receive Block bytes via Write.
@@ -45,9 +68,7 @@ func (w *WAVWriter) Write(b []byte) (int, error) {
 	if w.closed {
 		return 0, os.ErrClosed
 	}
-	n, err := w.f.Write(b)
-	w.written += uint32(n)
-	return n, err
+	return capWrite(w.f, &w.written, b, 2)
 }
 
 // Close patches the two size fields in the header and closes the file.
@@ -106,9 +127,7 @@ func (w *MultiWAVWriter) Write(b []byte) (int, error) {
 	if w.closed {
 		return 0, os.ErrClosed
 	}
-	n, err := w.f.Write(b)
-	w.written += uint32(n)
-	return n, err
+	return capWrite(w.f, &w.written, b, 2*int(w.channels))
 }
 
 // Close patches the two size fields and closes the file. Idempotent.

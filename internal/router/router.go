@@ -33,6 +33,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -159,14 +160,17 @@ type Router struct {
 	// hot path (txReader, rxFeeder) so it lives in an atomic pointer.
 	// recordMu serialises Start/StopRecording against each other and
 	// against shutdown.
-	session  atomic.Pointer[recordSession]
-	recordMu sync.Mutex
+	session       atomic.Pointer[recordSession]
+	recordMu      sync.Mutex
+	recordStopped bool // set by shutdown under recordMu; refuses new sessions
 
 	// composite is the active composite (multi-channel TX timeline)
 	// recorder, or nil. Read on the txReader hot path, so atomic.
 	// compositeMu serialises Start/StopCompositeRecording and shutdown.
-	composite   atomic.Pointer[compositeRecorder]
-	compositeMu sync.Mutex
+	composite        atomic.Pointer[compositeRecorder]
+	compositeMu      sync.Mutex
+	compositeStopped bool   // set by shutdown under compositeMu
+	lastComposite    string // file finalised by shutdown, if one was running
 
 	// txTrackers — one per port — record the wall-clock time of each
 	// port's last above-threshold TX block. The txWatchdog goroutine
@@ -283,6 +287,16 @@ func (q *linkQueue) push(blk audio.Block, logger *slog.Logger) {
 		logger.Warn("audio queue safety cap reached (rxFeeder stalled?)", "from", q.src, "to", q.dst)
 	}
 	q.buf = append(q.buf, queuedBlock{blk: blk, sot: sot})
+}
+
+// pushTail appends the zero-padded last block of a transmission that has
+// already gone quiet. It belongs to that transmission: it is never tagged
+// start-of-transmission and doesn't count as fresh activity for the next
+// transmission's boundary test.
+func (q *linkQueue) pushTail(blk audio.Block) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.buf = append(q.buf, queuedBlock{blk: blk})
 }
 
 // pop returns one block if immediately available (FIFO, oldest first).
@@ -404,6 +418,7 @@ func Start(ctx context.Context, cfg *config.Config, opts Options) (*Router, erro
 
 			child, err := tnc.Start(rctx, spec)
 			if err != nil {
+				cancel()
 				_ = r.shutdown()
 				return nil, fmt.Errorf("start %s: %w", ref, err)
 			}
@@ -434,7 +449,7 @@ func Start(ctx context.Context, cfg *config.Config, opts Options) (*Router, erro
 		r.wg.Add(2)
 		go func() {
 			defer r.wg.Done()
-			r.txReader(rctx, ref, child)
+			r.txReader(rctx, ref, child.TXAudio())
 		}()
 		go func() {
 			defer r.wg.Done()
@@ -503,13 +518,31 @@ func (r *Router) shutdown() error {
 		_ = c.Stop()
 	}
 	r.wg.Wait()
-	if s := r.session.Swap(nil); s != nil {
+	// Close recordings under their locks, with the stopped flags set, so
+	// a StartRecording racing with shutdown can't leave a session (or a
+	// composite writing silence forever) on a dead router.
+	r.recordMu.Lock()
+	r.recordStopped = true
+	s := r.session.Swap(nil)
+	r.recordMu.Unlock()
+	if s != nil {
 		s.Close()
 	}
+	r.compositeMu.Lock()
+	r.compositeStopped = true
 	if cr := r.composite.Swap(nil); cr != nil {
-		cr.stop()
+		r.lastComposite = cr.stop().Path
 	}
+	r.compositeMu.Unlock()
 	return nil
+}
+
+// LastCompositePath is the composite recording that shutdown finalised,
+// if one was still running when the router stopped.
+func (r *Router) LastCompositePath() string {
+	r.compositeMu.Lock()
+	defer r.compositeMu.Unlock()
+	return r.lastComposite
 }
 
 // StartRecording opens a fresh timestamped subdirectory under
@@ -522,6 +555,9 @@ func (r *Router) StartRecording() (string, error) {
 	defer r.recordMu.Unlock()
 	if r.opts.RecordDir == "" {
 		return "", errors.New("recorder: no RecordDir configured")
+	}
+	if r.recordStopped {
+		return "", errors.New("recorder: the router has stopped")
 	}
 	if r.session.Load() != nil {
 		return "", errors.New("recorder: already recording")
@@ -585,16 +621,82 @@ func (r *Router) Wait() {
 //
 // The loop exits when src.Read returns an error — typically because
 // Stop() closed the underlying socket / file at shutdown.
-func (r *Router) txReader(ctx context.Context, ref config.PortRef, c *tnc.Child) {
-	src := c.TXAudio()
+func (r *Router) txReader(ctx context.Context, ref config.PortRef, src io.Reader) {
 	buf := make([]byte, 4096)
 	pending := make([]byte, 0, audio.BlockBytes*4)
-	outgoing := r.linkQueues[ref]   // empty slice if this port has no outgoing links
-	tt := r.txTrackers[ref]         // may be nil only if Start partially failed
+	outgoing := r.linkQueues[ref] // empty slice if this port has no outgoing links
+	tt := r.txTrackers[ref]       // may be nil only if Start partially failed
+
+	// A TNC's burst rarely ends on a block boundary, and the remainder
+	// would otherwise sit in pending until the next transmission, then go
+	// out in front of it. Where the source supports read deadlines
+	// (samoyed's UDP, direwolf's FIFO), a quiet spell as long as the
+	// transmission-boundary window flushes it as a zero-padded block
+	// belonging to the transmission that just ended. The pdn backend pads
+	// its own bursts, so it needs none of this.
+	dl, _ := src.(interface{ SetReadDeadline(time.Time) error })
+	tailGap := scaled(txSilenceWindow, r.cfg.TimeScale)
+	deadlineSet := false
+
+	emit := func(blk audio.Block, tail bool) {
+		peak := blk.PeakAbs()
+		if r.opts.Verbose {
+			r.logger.Debug("tx block", "port", ref, "peak", peak, "outgoing", len(outgoing), "tail", tail)
+		}
+		// Bump the TX tracker on every active block; the watchdog
+		// goroutine emits tx_start (first bump) and tx_end (after
+		// txSilenceWindow with no further bumps). A flushed tail is the
+		// end of a transmission, not activity.
+		if !tail && r.opts.EventBus != nil && tt != nil && peak >= txActiveThreshold {
+			tt.lastBusyNanos.Store(time.Now().UnixNano())
+			if !tt.active.Swap(true) {
+				r.opts.EventBus.Publish(events.Event{
+					T:    time.Now(),
+					Type: events.TXStart,
+					Port: ref.String(),
+					Peak: peak,
+				})
+			}
+		}
+		if s := r.session.Load(); s != nil {
+			s.WriteTX(ref, blk)
+		}
+		if cr := r.composite.Load(); cr != nil {
+			cr.feed(ref, blk)
+		}
+		if r.opts.AudioTap != nil {
+			key := ref.String() + "|tx"
+			if r.opts.AudioTap.HasSubscribers(key) {
+				r.opts.AudioTap.Publish(key, blk)
+			}
+		}
+		for _, q := range outgoing {
+			if tail {
+				q.pushTail(blk)
+			} else {
+				q.push(blk, r.logger)
+			}
+		}
+	}
 
 	for {
+		if dl != nil && (len(pending) > 0) != deadlineSet {
+			deadlineSet = len(pending) > 0
+			when := time.Time{}
+			if deadlineSet {
+				when = time.Now().Add(tailGap)
+			}
+			_ = dl.SetReadDeadline(when)
+		}
 		n, err := src.Read(buf)
 		if err != nil {
+			if deadlineSet && errors.Is(err, os.ErrDeadlineExceeded) {
+				blk := make(audio.Block, audio.BlockBytes)
+				copy(blk, pending)
+				pending = pending[:0]
+				emit(blk, true)
+				continue
+			}
 			// EOF / closed-during-shutdown is the normal exit path.
 			if ctx.Err() != nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 				return
@@ -605,44 +707,16 @@ func (r *Router) txReader(ctx context.Context, ref config.PortRef, c *tnc.Child)
 		if n == 0 {
 			continue
 		}
+		if deadlineSet {
+			// Still transmitting: push the deadline out again.
+			_ = dl.SetReadDeadline(time.Now().Add(tailGap))
+		}
 		pending = append(pending, buf[:n]...)
 		for len(pending) >= audio.BlockBytes {
 			blk := make(audio.Block, audio.BlockBytes)
 			copy(blk, pending[:audio.BlockBytes])
 			pending = pending[audio.BlockBytes:]
-			peak := blk.PeakAbs()
-			if r.opts.Verbose {
-				r.logger.Debug("tx block", "port", ref, "peak", peak, "outgoing", len(outgoing))
-			}
-			// Bump the TX tracker on every active block; the watchdog
-			// goroutine emits tx_start (first bump) and tx_end (after
-			// txSilenceWindow with no further bumps).
-			if r.opts.EventBus != nil && tt != nil && peak >= txActiveThreshold {
-				tt.lastBusyNanos.Store(time.Now().UnixNano())
-				if !tt.active.Swap(true) {
-					r.opts.EventBus.Publish(events.Event{
-						T:    time.Now(),
-						Type: events.TXStart,
-						Port: ref.String(),
-						Peak: peak,
-					})
-				}
-			}
-			if s := r.session.Load(); s != nil {
-				s.WriteTX(ref, blk)
-			}
-			if cr := r.composite.Load(); cr != nil {
-				cr.feed(ref, blk)
-			}
-			if r.opts.AudioTap != nil {
-				key := ref.String() + "|tx"
-				if r.opts.AudioTap.HasSubscribers(key) {
-					r.opts.AudioTap.Publish(key, blk)
-				}
-			}
-			for _, q := range outgoing {
-				q.push(blk, r.logger)
-			}
+			emit(blk, false)
 		}
 	}
 }

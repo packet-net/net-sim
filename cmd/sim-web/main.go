@@ -199,6 +199,7 @@ type app struct {
 
 	mu       sync.Mutex
 	router   *router.Router
+	running  *config.Config // the topology the running router was started with
 	cancel   context.CancelFunc
 	lastErr  string
 	lastTime time.Time
@@ -545,18 +546,17 @@ func (a *app) writeStatus(w http.ResponseWriter) {
 		resp.LastEvent = a.lastTime.Format(time.RFC3339)
 	}
 
-	if a.router != nil {
-		// Re-read config so the port list reflects what's currently running.
-		if cfg, err := config.Load(a.cfgPath); err == nil {
-			for _, n := range cfg.Nodes {
-				for _, p := range n.Ports {
-					resp.Ports = append(resp.Ports, portStatusItem{
-						Node:     n.ID,
-						Port:     p.ID,
-						Mode:     string(p.Modem.Mode),
-						KissPort: p.KissPort,
-					})
-				}
+	if a.running != nil {
+		// The topology the router is actually running, not the file on
+		// disk, which may have been edited since.
+		for _, n := range a.running.Nodes {
+			for _, p := range n.Ports {
+				resp.Ports = append(resp.Ports, portStatusItem{
+					Node:     n.ID,
+					Port:     p.ID,
+					Mode:     string(p.Modem.Mode),
+					KissPort: p.KissPort,
+				})
 			}
 		}
 	}
@@ -809,6 +809,7 @@ func (a *app) start() error {
 		return err
 	}
 	a.router = r
+	a.running = cfg
 	a.cancel = cancel
 	a.lastErr = ""
 	a.lastTime = time.Now()
@@ -825,12 +826,7 @@ func (a *app) watchRouter(r *router.Router) {
 	if a.router != r {
 		return // stopped deliberately via stop()
 	}
-	_ = r.Stop()
-	a.router = nil
-	if a.cancel != nil {
-		a.cancel()
-		a.cancel = nil
-	}
+	_ = a.stopRouterLocked()
 	a.lastErr = "simulator stopped: a TNC process exited (see the log)"
 	a.lastTime = time.Now()
 }
@@ -841,13 +837,25 @@ func (a *app) stop() error {
 	if a.router == nil {
 		return nil
 	}
-	err := a.router.Stop()
+	err := a.stopRouterLocked()
+	a.lastTime = time.Now()
+	return err
+}
+
+// stopRouterLocked stops the router and clears it. It keeps the download
+// link for a composite recording that the stop finalised. Caller holds a.mu.
+func (a *app) stopRouterLocked() error {
+	r := a.router
+	err := r.Stop()
+	if p := r.LastCompositePath(); p != "" {
+		a.lastComposite = p
+	}
 	a.router = nil
+	a.running = nil
 	if a.cancel != nil {
 		a.cancel()
 		a.cancel = nil
 	}
-	a.lastTime = time.Now()
 	return err
 }
 

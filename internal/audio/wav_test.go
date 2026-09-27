@@ -2,6 +2,7 @@ package audio
 
 import (
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -98,5 +99,23 @@ func TestWAVWriterWriteAfterCloseFails(t *testing.T) {
 	_ = w.Close()
 	if _, err := w.Write(make([]byte, 4)); err == nil {
 		t.Error("Write after Close should error")
+	}
+}
+
+func TestWAVWriterStopsAtSizeLimit(t *testing.T) {
+	w, err := NewWAVWriter(filepath.Join(t.TempDir(), "full.wav"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	w.written = maxWAVData - 1000 // pretend ~4 GiB is already on disk
+	if _, err := w.Write(make([]byte, 882)); err != nil {
+		t.Fatalf("write under the limit: %v", err)
+	}
+	if _, err := w.Write(make([]byte, 882)); !errors.Is(err, ErrWAVFull) {
+		t.Fatalf("write over the limit: err %v, want ErrWAVFull", err)
+	}
+	if w.written > maxWAVData {
+		t.Fatalf("written %d exceeds the WAV limit", w.written)
 	}
 }
