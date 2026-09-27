@@ -3,18 +3,18 @@
 #
 # Run as root on a Debian/Ubuntu host:
 #
-#   curl -fsSL https://raw.githubusercontent.com/packethacking/net-sim/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/packet-net/net-sim/main/install.sh | sudo bash
 #
 # Or, with overrides:
 #
-#   curl -fsSL https://raw.githubusercontent.com/packethacking/net-sim/main/install.sh | \
+#   curl -fsSL https://raw.githubusercontent.com/packet-net/net-sim/main/install.sh | \
 #     sudo SIM_DIR=/opt/sim SAMOYED_DIR=/opt/samoyed bash
 #
 # Idempotent — safe to re-run. Doesn't install pulseaudio / pipewire /
 # jackd / any sound daemon (that's the whole point of net-sim).
 set -euo pipefail
 
-SIM_REPO="${SIM_REPO:-https://github.com/packethacking/net-sim.git}"
+SIM_REPO="${SIM_REPO:-https://github.com/packet-net/net-sim.git}"
 SIM_REF="${SIM_REF:-main}"
 SIM_DIR="${SIM_DIR:-/opt/sim}"
 
@@ -125,7 +125,7 @@ if [ "$SYSTEMD" = "1" ] && [ -d /run/systemd/system ]; then
     cat > /etc/systemd/system/sim-web.service <<UNIT
 [Unit]
 Description=net-sim web UI and embedded router
-Documentation=https://github.com/packethacking/net-sim
+Documentation=https://github.com/packet-net/net-sim
 After=network-online.target
 
 [Service]

@@ -20,7 +20,7 @@
 #     -v ./my-network.yaml:/etc/sim/network.yaml \
 #     net-sim:dev
 #
-# Published image: ghcr.io/packethacking/net-sim
+# Published image: ghcr.io/packet-net/net-sim
 # Tags: :main, :main-<sha>, :v<x.y.z>, :latest (on tagged release)
 
 # ---- builder ------------------------------------------------------------

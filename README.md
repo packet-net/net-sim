@@ -49,14 +49,14 @@ between samoyed and the router). No PulseAudio, PipeWire, JACK, or
 Pre-built images on ghcr:
 
 ```
-docker pull ghcr.io/packethacking/net-sim:main
+docker pull ghcr.io/packet-net/net-sim:main
 ```
 
 Bundled default network (two AFSK1200 nodes, KISS on `8001`/`8002`):
 
 ```
 docker run --rm -p 8080:8080 -p 8001:8001 -p 8002:8002 \
-  ghcr.io/packethacking/net-sim:main
+  ghcr.io/packet-net/net-sim:main
 ```
 
 Open <http://localhost:8080> for the web UI; KISS-attach your AX.25
@@ -69,7 +69,7 @@ predict them:
 ```
 docker run --rm --network=host \
   -v $PWD/my-network.yaml:/etc/sim/network.yaml \
-  ghcr.io/packethacking/net-sim:main
+  ghcr.io/packet-net/net-sim:main
 ```
 
 Tags published:
@@ -107,7 +107,7 @@ Granting the capability in Docker (`--cap-add SYS_NICE`), or in compose:
 ```yaml
 services:
   net-sim:
-    image: ghcr.io/packethacking/net-sim:main
+    image: ghcr.io/packet-net/net-sim:main
     cap_add: [SYS_NICE]
 ```
 
@@ -121,7 +121,7 @@ On a fresh Debian 12 / Ubuntu 24.04+ host (LXC, VM, bare metal — anywhere
 you have root and apt):
 
 ```
-curl -fsSL https://raw.githubusercontent.com/packethacking/net-sim/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/packet-net/net-sim/main/install.sh | sudo bash
 ```
 
 That script installs apt build-deps, clones and builds samoyed at
@@ -566,8 +566,8 @@ What "collision garbage" sounds like is selectable via `collision_mode`:
 This is a gap in the current samoyed build that affects what you can
 test against; it will likely land in samoyed soon and we'll bump the
 pin then. Tracker issues:
-[net-sim#1](https://github.com/packethacking/net-sim/issues/1) /
-[net-sim#2](https://github.com/packethacking/net-sim/issues/2).
+[net-sim#1](https://github.com/packet-net/net-sim/issues/1) /
+[net-sim#2](https://github.com/packet-net/net-sim/issues/2).
 
 - **No IL2P+CRC (a.k.a. IL2Pc) support.** Samoyed implements the IL2P
   v0.6 base form — header + payload, Reed-Solomon FEC, no trailing 2-byte
