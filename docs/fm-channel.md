@@ -79,6 +79,15 @@ On an open-squelch receiver, which is how packet stations normally run, the hiss
 
 With the squelch closed (`radio: { squelch: hard }`) all three go away, as they would on air.
 
+One more, with the squelch closed and a strong link: pdn's frequency matching (on by default) costs frames. After a station has heard three frames from another, it trims its transmitter to the offset it measured, and the next reply is sometimes lost. Three frames each way between two pdn stations:
+
+| Mode | Frequency matching off | On |
+|---|---|---|
+| c4fsk9600 | 6 of 6 | 5 of 6 in one run, 3 of 6 in another |
+| qpsk3600 | 6 of 6 | 5 of 6 |
+
+The channel has no frequency error, yet pdn measured offsets from -5 to +7 Hz. The same received audio decodes offline, so it is the live receiver's state or the trimmed transmission, not the channel. net-sim runs pdn from command-line flags, and frequency matching is only in pdn's config file, so it can't be switched off per port yet.
+
 ## Changing the model
 
 If M0LTE.FmChannel changes, bump the version in `tools/fmref/fmref.csproj`, run `dotnet run -c Release` in that directory, and run `go test ./internal/fm`. A failure means the port no longer matches the package.
