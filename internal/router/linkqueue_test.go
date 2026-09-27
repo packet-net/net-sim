@@ -12,13 +12,13 @@ import (
 // gap-free: net-sim models a continuous carrier and must never drop audio
 // within a transmission. Dropping mid-transmission gaps the receiver's audio,
 // collapses its carrier sense, and makes the far end key up on top of the
-// in-progress transmission (a collision) — the bug this non-dropping FIFO
+// in-progress transmission (a collision), the bug this non-dropping FIFO
 // fixes. Regression for the 3 s drop-on-overflow `linkQueue`.
 func TestLinkQueueDeliversLongBurstGapFree(t *testing.T) {
 	q := newLinkQueue(
 		config.PortRef{NodeID: "a", PortID: "vhf"},
 		config.PortRef{NodeID: "b", PortID: "vhf"},
-		0, 0, 0, txSilenceWindow,
+		linkRF{},
 	)
 
 	// ~10 s of audio — well past the old 3 s cap that used to drop.
@@ -27,11 +27,12 @@ func TestLinkQueueDeliversLongBurstGapFree(t *testing.T) {
 		blk := make(audio.Block, audio.BlockBytes)
 		blk[0] = byte(i)
 		blk[1] = byte(i >> 8)
-		q.push(blk, slog.Default())
+		q.push(queuedBlock{blk: blk}, slog.Default())
 	}
 
 	for i := 0; i < n; i++ {
-		blk, ok := q.pop()
+		qb, ok := q.pop()
+		blk := qb.blk
 		if !ok {
 			t.Fatalf("block %d of %d was dropped — the queue must never drop within a transmission", i, n)
 		}

@@ -199,6 +199,15 @@ func startPdn(ctx context.Context, s Spec) (*Child, error) {
 		return fail(err)
 	}
 
+	rx := newPdnRxWriter(rxFifo, io.Discard)
+	if len(s.RxPrime) > 0 {
+		// Written before pdn starts, in place of the silence cushion.
+		rx.primed = true
+		if _, err := rx.Write(s.RxPrime); err != nil {
+			return fail(fmt.Errorf("prime rx fifo: %w", err))
+		}
+	}
+
 	cmd := exec.CommandContext(ctx, s.PdnBin, pdnArgs(s, rxPath, txPath)...)
 	cmd.Dir = portDir
 	// pdn keeps state files beside its config or in $STATE_DIRECTORY; we
@@ -220,10 +229,11 @@ func startPdn(ctx context.Context, s Spec) (*Child, error) {
 	c := &Child{
 		spec:     s,
 		cmd:      cmd,
-		stdin:    newPdnRxWriter(rxFifo, prefixed),
+		stdin:    rx,
 		txReader: newPdnTxReader(txFifo),
 		cleanups: cleanups,
 	}
+	rx.log = prefixed
 	c.watch()
 
 	if err := waitListening(ctx, s.KissPort, pdnStartTimeout, c.exited); err != nil {

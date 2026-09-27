@@ -11,12 +11,12 @@ import (
 )
 
 // A burst that doesn't end on a block boundary must still reach the link
-// queue once the source goes quiet, zero-padded, as part of the same
-// transmission, rather than waiting for the next burst.
+// queue once the source goes quiet, zero-padded, rather than waiting for
+// the next burst.
 func TestTxReaderFlushesBurstTail(t *testing.T) {
 	src := config.PortRef{NodeID: "a", PortID: "vhf"}
 	dst := config.PortRef{NodeID: "b", PortID: "vhf"}
-	q := newLinkQueue(src, dst, 0, 0, 0, txSilenceWindow)
+	q := newLinkQueue(src, dst, linkRF{})
 	r := &Router{
 		cfg:        &config.Config{TimeScale: 1},
 		logger:     quietLogger(),
@@ -56,9 +56,6 @@ func TestTxReaderFlushesBurstTail(t *testing.T) {
 		t.Fatalf("queue holds %d blocks, want the full block plus the flushed tail", len(q.buf))
 	}
 	tail := q.buf[1]
-	if tail.sot {
-		t.Error("flushed tail was tagged as the start of a new transmission")
-	}
 	if tail.blk[99] != 0x11 || tail.blk[100] != 0 || tail.blk[len(tail.blk)-1] != 0 {
 		t.Error("tail block is not the last 100 bytes followed by zero padding")
 	}

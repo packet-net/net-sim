@@ -69,6 +69,10 @@ const txSilenceWindow = 200 * time.Millisecond
 // keeps the same sim-time resolution.
 const txWatchdogTick = 50 * time.Millisecond
 
+// rxPrimeMS is how much of each receiver's idle output is put in front of
+// its TNC's audio before the TNC starts. See Start.
+const rxPrimeMS = 150
+
 // pdnWarmup is how long Start waits, feeding audio, before returning when
 // any port runs pdn-soundmodem. See Start.
 const pdnWarmup = time.Second
@@ -138,10 +142,14 @@ type Options struct {
 
 // Router is the running simulator.
 type Router struct {
-	opts   Options
-	cfg    *config.Config
-	mixer  *audio.Mixer
-	logger *slog.Logger
+	opts Options
+	cfg  *config.Config
+
+	// stations are the ports' radios; factor is the IF oversampling they
+	// share. See channel.go.
+	stations map[config.PortRef]*station
+	factor   int
+	logger   *slog.Logger
 
 	mu       sync.RWMutex
 	children map[config.PortRef]*tnc.Child
@@ -198,120 +206,61 @@ type txTracker struct {
 // real keyup is at most a few seconds.
 const maxQueueBlocks = 60 * audio.SampleRate / audio.BlockSamples
 
-// queuedBlock is one FIFO entry: the PCM block plus a start-of-transmission
-// marker set by push when the block began a new keyup (see push for how the
-// boundary is detected). Carrying the boundary on the block itself keeps the
-// pop side timing-independent: the squelch mute is counted in blocks of the
-// transmission, not in wall clock.
+// queuedBlock is one FIFO entry: a block of the transmitter's audio (as
+// its TNC produced it) and the same block as modulated carrier at the IF
+// rate, which is what receivers hear. The carrier is shared, read-only, by
+// every link the transmitter fans out to.
 type queuedBlock struct {
 	blk audio.Block
-	sot bool // start of transmission
+	iq  []complex128
 }
 
-// linkQueue is one source→destination link's audio buffer: a non-dropping FIFO
-// of PCM blocks the source has transmitted, drained by the destination's
-// rxFeeder at the channel sample rate (so the receiver hears the carrier in
-// real time).
+// linkQueue is one source->destination link: a non-dropping FIFO of the
+// carrier blocks the source has transmitted, drained by the destination's
+// rxFeeder in real time, plus the link's radio path (received level,
+// frequency offset).
 //
 // A TNC bursts a whole keyup's worth of audio with no real-time pacing on its
 // end (see txReader), so the buffer must hold an entire transmission and the
 // rxFeeder plays it out at real time. It is non-dropping and grows as needed:
-// dropping mid-transmission would gap the receiver's audio, collapse its DCD /
-// carrier sense, and make the far end key up on top of an in-progress
-// transmission — a collision that cannot happen on a real continuous-carrier
-// channel. Memory is bounded in practice (a keyup is finite; the backing array
-// is released once drained); only a pathological runaway past maxQueueBlocks
+// dropping mid-transmission would drop the carrier mid-keyup, collapse the
+// far end's DCD and make it key up on top of an in-progress transmission.
+// Memory is bounded in practice (a keyup is finite; the backing array is
+// released once drained); only a pathological runaway past maxQueueBlocks
 // ever drops.
-//
-// The linkQueue is also where the squelch_open_ms model lives — it is the
-// per-directed-link seam the squelch belongs to (squelch is a property of the
-// destination receiver hearing this particular carrier): pop substitutes
-// silence for the first squelchBlocks blocks of every transmission.
 type linkQueue struct {
 	src, dst config.PortRef
-	loss     float64
-	noise    float64
+	rf       linkRF // rot is touched only by the destination's rxFeeder
 
-	// squelchBlocks is the number of leading blocks of every transmission
-	// delivered as silence (squelch_open_ms rounded up to whole blocks).
-	// Counted in blocks — i.e. in sim-time audio — so the muted span is
-	// the same amount of *audio* regardless of time_scale. 0 = squelch
-	// opens instantly (default; pop is then byte-transparent).
-	squelchBlocks int
-
-	// silenceWindow is the push-side wall-clock idle gap that separates
-	// two transmissions. It mirrors the txWatchdog's rule exactly (the
-	// time-scaled txSilenceWindow): the source TNC bursts a keyup faster
-	// than real time but pauses between *frames inside one keyup* show up
-	// as short gaps on its TX stream, and the watchdog already answers
-	// "is this still the same transmission?" with this window. Reusing it
-	// here — rather than, say, a pop-side "queue drained" test, which
-	// would misfire whenever the rxFeeder catches up with a still-keyed
-	// source — keeps the two transmission-boundary definitions identical.
-	silenceWindow time.Duration
-	now           func() time.Time // stubbed by tests
-
-	mu            sync.Mutex
-	buf           []queuedBlock // FIFO; index 0 = oldest
-	lastPush      time.Time
-	muteRemaining int // blocks of the current transmission still to mute
+	mu  sync.Mutex
+	buf []queuedBlock // FIFO; index 0 = oldest
 }
 
-func newLinkQueue(src, dst config.PortRef, loss, noise float64, squelchBlocks int, silenceWindow time.Duration) *linkQueue {
-	return &linkQueue{
-		src: src, dst: dst, loss: loss, noise: noise,
-		squelchBlocks: squelchBlocks,
-		silenceWindow: silenceWindow,
-		now:           time.Now,
-	}
+func newLinkQueue(src, dst config.PortRef, rf linkRF) *linkQueue {
+	return &linkQueue{src: src, dst: dst, rf: rf}
 }
 
-// push appends a block to the link's buffer. It never blocks and — modelling a
-// continuous carrier — never drops within a transmission, no matter how far the
-// source TNC has run ahead of real time. The only drop is the maxQueueBlocks
-// safety valve, which signals a stalled rxFeeder rather than normal operation,
-// so it is logged.
-//
-// The block is tagged start-of-transmission when it is the first push after a
-// silenceWindow-sized idle gap (the same idle→active transition the txTracker
-// uses) — that tag is what re-arms the squelch mute on the pop side.
-func (q *linkQueue) push(blk audio.Block, logger *slog.Logger) {
+// push appends a block to the link's buffer. It never blocks and never drops
+// within a transmission, no matter how far the source TNC has run ahead of
+// real time. The only drop is the maxQueueBlocks safety valve, which signals
+// a stalled rxFeeder rather than normal operation, so it is logged.
+func (q *linkQueue) push(qb queuedBlock, logger *slog.Logger) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	now := q.now()
-	sot := q.lastPush.IsZero() || now.Sub(q.lastPush) >= q.silenceWindow
-	q.lastPush = now
 	if len(q.buf) >= maxQueueBlocks {
 		q.buf[0] = queuedBlock{}
 		q.buf = q.buf[1:]
 		logger.Warn("audio queue safety cap reached (rxFeeder stalled?)", "from", q.src, "to", q.dst)
 	}
-	q.buf = append(q.buf, queuedBlock{blk: blk, sot: sot})
-}
-
-// pushTail appends the zero-padded last block of a transmission that has
-// already gone quiet. It belongs to that transmission: it is never tagged
-// start-of-transmission and doesn't count as fresh activity for the next
-// transmission's boundary test.
-func (q *linkQueue) pushTail(blk audio.Block) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.buf = append(q.buf, queuedBlock{blk: blk})
+	q.buf = append(q.buf, qb)
 }
 
 // pop returns one block if immediately available (FIFO, oldest first).
-//
-// While the squelch is opening (the first squelchBlocks blocks of each
-// transmission), pop delivers silence INSTEAD OF the block — not nothing:
-// the carrier is on the air and the mixer must still see it for capture /
-// collision decisions; it is only the receiver's audio that stays muted
-// until the squelch opens. The original block is never modified (it is
-// shared with every other link the source fans out to).
-func (q *linkQueue) pop() (audio.Block, bool) {
+func (q *linkQueue) pop() (queuedBlock, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if len(q.buf) == 0 {
-		return nil, false
+		return queuedBlock{}, false
 	}
 	qb := q.buf[0]
 	q.buf[0] = queuedBlock{} // release the reference
@@ -319,24 +268,7 @@ func (q *linkQueue) pop() (audio.Block, bool) {
 	if len(q.buf) == 0 {
 		q.buf = nil // release the backing array once drained
 	}
-	if qb.sot {
-		q.muteRemaining = q.squelchBlocks
-	}
-	if q.muteRemaining > 0 {
-		q.muteRemaining--
-		return audio.Silence(), true
-	}
-	return qb.blk, true
-}
-
-// squelchBlocksFor converts a link's squelch_open_ms into a whole number of
-// audio blocks, rounding up so a configured delay is never under-delivered.
-func squelchBlocksFor(ms float64) int {
-	if ms <= 0 {
-		return 0
-	}
-	const blockMS = float64(audio.BlockSamples) * 1000 / audio.SampleRate
-	return int(math.Ceil(ms / blockMS))
+	return qb, true
 }
 
 // Start spawns all samoyed children and begins routing audio.
@@ -357,10 +289,12 @@ func Start(ctx context.Context, cfg *config.Config, opts Options) (*Router, erro
 	}
 
 	rctx, cancel := context.WithCancel(ctx)
+	stations, factor := newStations(cfg)
 	r := &Router{
 		opts:       opts,
 		cfg:        cfg,
-		mixer:      audio.NewMixer(cfg.CaptureDB, cfg.MixerMode == config.MixerLinearSum, string(cfg.CollisionMode)),
+		stations:   stations,
+		factor:     factor,
 		logger:     opts.Logger,
 		children:   map[config.PortRef]*tnc.Child{},
 		linkQueues: map[config.PortRef][]*linkQueue{},
@@ -373,11 +307,10 @@ func Start(ctx context.Context, cfg *config.Config, opts Options) (*Router, erro
 	for _, l := range cfg.Links {
 		fr, _ := parsePortRef(l.From)
 		to, _ := parsePortRef(l.To)
-		// The transmission-boundary window scales with time_scale just
-		// like the txWatchdog's: at scale N the audio (and its gaps)
-		// arrives N× faster.
-		q := newLinkQueue(fr, to, l.LossDB, l.NoiseDB,
-			squelchBlocksFor(l.SquelchOpenMS), scaled(txSilenceWindow, cfg.TimeScale))
+		rf := newLinkRF(stations[fr], stations[to], *l.PathLossDB, factor)
+		q := newLinkQueue(fr, to, rf)
+		r.logger.Debug("link", "from", fr, "to", to, "rx_dbm", math.Round(rf.rxDBm*10)/10,
+			"cnr_db", math.Round((rf.rxDBm-stations[to].floorDBm)*10)/10)
 		r.linkQueues[fr] = append(r.linkQueues[fr], q)
 		r.rxLinks[to] = append(r.rxLinks[to], q)
 	}
@@ -385,6 +318,13 @@ func Start(ctx context.Context, cfg *config.Config, opts Options) (*Router, erro
 	if opts.RTPriority {
 		// pid 0 = this process (the router and all its pacing tickers).
 		applyRTPriority(r.logger, "sim-router", 0)
+	}
+
+	// One tx tracker per port; pointers are stable across the run.
+	for _, n := range cfg.Nodes {
+		for _, p := range n.Ports {
+			r.txTrackers[config.PortRef{NodeID: n.ID, PortID: p.ID}] = &txTracker{}
+		}
 	}
 
 	udpPort := opts.StartingRxAudioPort
@@ -410,6 +350,14 @@ func Start(ctx context.Context, cfg *config.Config, opts Options) (*Router, erro
 			if opts.Observer != nil {
 				spec.StderrTap = opts.Observer.WriterFor(ref)
 			}
+			// A real station hears its receiver from the first sample: an
+			// open squelch is hiss from the start, never silence. Give the
+			// TNC's audio input a moment of exactly that before it starts,
+			// or an energy-based carrier sense sees silence turn into hiss
+			// and calls the channel busy.
+			st := r.stations[ref]
+			st.iq = make([]complex128, audio.BlockSamples*factor)
+			spec.RxPrime = st.idle(msBlocks(rxPrimeMS))
 			// direwolf and pdn don't use the per-port UDP port. Reserve
 			// it anyway so subsequent samoyed ports get the next one
 			// regardless of preceding direwolf/pdn ports; keeps the UDP
@@ -435,47 +383,8 @@ func Start(ctx context.Context, cfg *config.Config, opts Options) (*Router, erro
 				fields = append(fields, "rx_audio_udp", spec.RxAudioUDPPort)
 			}
 			r.logger.Info("port up", fields...)
+			r.runPort(rctx, cancel, ref, child)
 		}
-	}
-
-	// One tx tracker per port — pointers are stable across the run.
-	for ref := range r.children {
-		r.txTrackers[ref] = &txTracker{}
-	}
-
-	for ref, child := range r.children {
-		ref := ref
-		child := child
-		r.wg.Add(2)
-		go func() {
-			defer r.wg.Done()
-			r.txReader(rctx, ref, child.TXAudio())
-		}()
-		go func() {
-			defer r.wg.Done()
-			r.rxFeeder(rctx, ref, child.Stdin())
-		}()
-		if opts.EventBus != nil {
-			r.wg.Add(1)
-			go func() {
-				defer r.wg.Done()
-				r.txWatchdog(rctx, ref)
-			}()
-		}
-	}
-
-	for ref, child := range r.children {
-		ref := ref
-		child := child
-		r.wg.Add(1)
-		go func() {
-			defer r.wg.Done()
-			err := child.Wait()
-			if rctx.Err() == nil {
-				r.logger.Error("TNC child exited unexpectedly", "port", ref, "err", err)
-				cancel()
-			}
-		}()
 	}
 
 	// pdn-soundmodem's receivers need a moment of audio after start-up
@@ -499,6 +408,36 @@ func Start(ctx context.Context, cfg *config.Config, opts Options) (*Router, erro
 	}
 
 	return r, nil
+}
+
+// runPort starts a port's audio as soon as its TNC is up, rather than
+// after every port has started, so its receive audio never stalls.
+func (r *Router) runPort(rctx context.Context, cancel context.CancelFunc, ref config.PortRef, child *tnc.Child) {
+	r.wg.Add(2)
+	go func() {
+		defer r.wg.Done()
+		r.txReader(rctx, ref, child.TXAudio())
+	}()
+	go func() {
+		defer r.wg.Done()
+		r.rxFeeder(rctx, ref, child.Stdin())
+	}()
+	if r.opts.EventBus != nil {
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			r.txWatchdog(rctx, ref)
+		}()
+	}
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		err := child.Wait()
+		if rctx.Err() == nil {
+			r.logger.Error("TNC child exited unexpectedly", "port", ref, "err", err)
+			cancel()
+		}
+	}()
 }
 
 // Done is closed when the router stops running: its parent context was
@@ -670,12 +609,14 @@ func (r *Router) txReader(ctx context.Context, ref config.PortRef, src io.Reader
 				r.opts.AudioTap.Publish(key, blk)
 			}
 		}
+		// Modulate once; every link shares the carrier. Even a radio with
+		// no links is on the air (and so deaf) while it transmits.
+		qb := queuedBlock{blk: blk}
+		if st := r.stations[ref]; st != nil {
+			qb.iq = st.modulate(blk, scaled(blockPeriod, r.cfg.TimeScale))
+		}
 		for _, q := range outgoing {
-			if tail {
-				q.pushTail(blk)
-			} else {
-				q.push(blk, r.logger)
-			}
+			q.push(qb, r.logger)
 		}
 	}
 
@@ -765,31 +706,31 @@ func (r *Router) txWatchdog(ctx context.Context, ref config.PortRef) {
 }
 
 // rxFeeder writes one audio block per blockPeriod (divided by time_scale)
-// to this port's samoyed stdin. The block is the mixer's verdict on every
-// active TX reaching this port through the topology.
-//
-// "Active" simply means a block is available on that link's queue. Per
-// PLAN Phase 3 self-mute, a port never hears its own TX — that's enforced
-// by config validation rejecting self-loops, so it's a no-op here.
+// to this port's TNC: whatever its radio's receiver makes of the carriers
+// reaching it through the topology this block, and its own noise. A port
+// never hears its own transmission (config validation rejects self-loops,
+// and a transmitting radio's receiver is muted).
 func (r *Router) rxFeeder(ctx context.Context, dst config.PortRef, stdin io.Writer) {
 	ticker := time.NewTicker(scaled(blockPeriod, r.cfg.TimeScale))
 	defer ticker.Stop()
 
 	links := r.rxLinks[dst] // links *into* this destination
-
-	// Per-port noise floor (the FM band-noise hiss). Looked up once
-	// here because the port + global config don't change at runtime.
-	// Resolution order: Port.NoiseDB → Config.DefaultNoiseDB → 0.
-	portNoise := r.portNoiseFloor(dst)
+	st := r.stations[dst]
+	openBlocks := msBlocks(st.radio.Squelch.OpenMS)
+	closeBlocks := msBlocks(st.radio.Squelch.CloseMS)
+	if len(st.iq) != audio.BlockSamples*r.factor {
+		st.iq = make([]complex128, audio.BlockSamples*r.factor)
+	}
 
 	// Per-destination RX event state. We emit rx_decision only when the
-	// (decision, source-set) tuple changes since the last block — busy
-	// channels would otherwise generate ~100 events/s/port. lastSources is
-	// kept sorted so equality comparison is straightforward.
+	// (decision, source-set) tuple changes since the last block - busy
+	// channels would otherwise generate ~100 events/s/port.
 	var (
-		lastDecision audio.MixDecision = -1
+		lastDecision = "none"
 		lastSources  string
 		sourcePorts  []*linkQueue // scratch, reused
+		carriers     []heard
+		levels       []float64
 	)
 
 	for {
@@ -799,36 +740,32 @@ func (r *Router) rxFeeder(ctx context.Context, dst config.PortRef, stdin io.Writ
 		case <-ticker.C:
 		}
 
-		var active []audio.ActiveTX
-		sourcePorts = sourcePorts[:0]
+		carriers, sourcePorts, levels = carriers[:0], sourcePorts[:0], levels[:0]
 		for _, q := range links {
-			b, ok := q.pop()
-			if !ok {
+			qb, ok := q.pop()
+			if !ok || qb.iq == nil {
 				continue
 			}
-			active = append(active, audio.ActiveTX{
-				Block:   b,
-				LossDB:  q.loss,
-				NoiseDB: q.noise,
-			})
+			carriers = append(carriers, heard{rf: &q.rf, iq: qb.iq})
 			sourcePorts = append(sourcePorts, q)
+			levels = append(levels, q.rf.rxDBm)
 		}
 
-		blk, dec := r.mixer.Mix(active)
+		blk, open := st.receive(carriers, openBlocks, closeBlocks)
+		dec := decisionFor(levels)
 
 		if r.opts.EventBus != nil {
 			srcKey, srcList := summariseSources(sourcePorts)
 			if dec != lastDecision || srcKey != lastSources {
-				// Only emit when something interesting is happening
-				// or when the channel just went quiet — both inform
-				// the visualiser, but silent-→-silent transitions
-				// (the common case) are skipped.
-				if dec != audio.MixSilence || lastDecision != -1 {
+				// Only emit when something interesting is happening or
+				// when the channel just went quiet; silent-to-silent
+				// transitions (the common case) are skipped.
+				if dec != "silence" || lastDecision != "none" {
 					r.opts.EventBus.Publish(events.Event{
 						T:        time.Now(),
 						Type:     events.RXDecision,
 						Port:     dst.String(),
-						Decision: decisionName(dec),
+						Decision: dec,
 						Sources:  srcList,
 					})
 				}
@@ -837,38 +774,9 @@ func (r *Router) rxFeeder(ctx context.Context, dst config.PortRef, stdin io.Writ
 			}
 		}
 
-		// Noise floor — always at least the receiver's own band-noise
-		// (FM band hiss, modelled per-port or via the global default).
-		// Per-link noise still considered so a noisy-medium link can
-		// add more than the receiver's own floor (rare, but supported).
-		// Applied *after* the capture decision so noise doesn't tilt
-		// the capture margin.
-		maxNoise := portNoise
-		for _, tx := range active {
-			if tx.NoiseDB > maxNoise {
-				maxNoise = tx.NoiseDB
-			}
-		}
-		if len(active) == 0 {
-			for _, q := range links {
-				if q.noise > maxNoise {
-					maxNoise = q.noise
-				}
-			}
-		}
-		if maxNoise > 0 {
-			// AddNoiseQuieted models the FM threshold effect: full
-			// hiss when the channel is idle, signal "captures" the
-			// limiter and drops the audible noise floor when a
-			// strong TX is present. See audio.AddNoiseQuieted.
-			r.mixer.AddNoiseQuieted(blk, maxNoise)
-		}
-
-		if r.opts.Verbose && dec != audio.MixSilence {
-			r.logger.Debug("rx mix",
-				"port", dst, "decision", decisionName(dec),
-				"sources", len(active),
-				"peak", blk.PeakAbs())
+		if r.opts.Verbose && dec != "silence" {
+			r.logger.Debug("rx", "port", dst, "decision", dec, "carriers", len(carriers),
+				"squelch_open", open, "peak", blk.PeakAbs())
 		}
 
 		if s := r.session.Load(); s != nil {
@@ -923,42 +831,4 @@ func summariseSources(qs []*linkQueue) (string, []string) {
 		key += "|" + list[i]
 	}
 	return key, list
-}
-
-// portNoiseFloor returns the receiver-side band-noise floor for a
-// port, in dB below full-scale. Port-level NoiseDB overrides the
-// global DefaultNoiseDB; both default to 0 (no global floor — old
-// per-link-only behaviour preserved when neither is set).
-func (r *Router) portNoiseFloor(ref config.PortRef) float64 {
-	for _, n := range r.cfg.Nodes {
-		if n.ID != ref.NodeID {
-			continue
-		}
-		for _, p := range n.Ports {
-			if p.ID != ref.PortID {
-				continue
-			}
-			if p.NoiseDB > 0 {
-				return p.NoiseDB
-			}
-			return r.cfg.DefaultNoiseDB
-		}
-	}
-	return r.cfg.DefaultNoiseDB
-}
-
-func decisionName(d audio.MixDecision) string {
-	switch d {
-	case audio.MixSilence:
-		return "silence"
-	case audio.MixSingle:
-		return "single"
-	case audio.MixCapture:
-		return "capture"
-	case audio.MixCollision:
-		return "collision"
-	case audio.MixSum:
-		return "sum"
-	}
-	return "?"
 }

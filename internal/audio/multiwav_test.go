@@ -103,3 +103,12 @@ func TestNewMultiWAVWriterRejectsZeroChannels(t *testing.T) {
 		t.Error("NewMultiWAVWriter(0) should error")
 	}
 }
+
+func mkBlock(level int16) Block {
+	b := make(Block, BlockBytes)
+	for i := 0; i+1 < BlockBytes; i += 2 {
+		b[i] = byte(uint16(level))
+		b[i+1] = byte(uint16(level) >> 8)
+	}
+	return b
+}
