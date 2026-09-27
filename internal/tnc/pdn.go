@@ -30,11 +30,12 @@ import (
 // FIFOs standing in for a sound card, raw 32-bit float samples, read and
 // written by the modem itself. We create both FIFOs, hold them open
 // read-write (so neither side blocks on the other being there), and put an
-// adapter on each so the router still sees 44.1 kHz int16 like every other
-// backend:
+// adapter on each so the router still sees int16 like every other backend.
+// Both sides run at the router's 48 kHz, so the adapters only convert
+// sample format:
 //
-//	router rxFeeder --s16 44.1k--> pdnRxWriter --f32 48k--> rx.fifo --> pdn
-//	pdn --> tx.fifo --f32 48k--> pdnTxReader --s16 44.1k--> router txReader
+//	router rxFeeder --s16--> pdnRxWriter --f32--> rx.fifo --> pdn
+//	pdn --> tx.fifo --f32--> pdnTxReader --s16--> router txReader
 //
 // Two behaviours of the pipe device shape the adapters:
 //
@@ -48,14 +49,14 @@ import (
 //
 //   - The transmit side writes each keyup as fast as the FIFO takes it and
 //     then nothing, exactly like samoyed's UDP. The router already handles
-//     bursts; the adapter only has to notice the end of one so it can push
-//     out the resampler's lookahead and pad to a whole router block,
-//     rather than leave the last few milliseconds stuck until the next
-//     transmission.
+//     bursts; the adapter only has to notice the end of one so it can pad
+//     to a whole router block, rather than leave the last few milliseconds
+//     stuck until the next transmission.
 
-// pdnPipeRate is the rate we run pdn's pipe device at: a multiple of
-// every pdn DSP rate (12 kHz and 48 kHz), as its start-up check requires.
-const pdnPipeRate = 48000
+// pdnPipeRate is the rate we run pdn's pipe device at: the router's, which
+// is a multiple of every pdn DSP rate (12 kHz and 48 kHz), as pdn's
+// start-up check requires.
+const pdnPipeRate = audio.SampleRate
 
 // pdnRxCushion is how much audio we keep queued ahead of pdn's reader, and
 // pdnRxMaxBacklog the most we let pile up before dropping blocks.
@@ -232,23 +233,21 @@ func startPdn(ctx context.Context, s Spec) (*Child, error) {
 	return c, nil
 }
 
-// pdnRxWriter takes the router's 44.1 kHz int16 blocks and writes them to
-// pdn's capture FIFO as 48 kHz float32, keeping the FIFO's backlog between
-// pdnRxCushion and pdnRxMaxBacklog.
+// pdnRxWriter takes the router's int16 blocks and writes them to pdn's
+// capture FIFO as float32, keeping the FIFO's backlog between pdnRxCushion
+// and pdnRxMaxBacklog.
 type pdnRxWriter struct {
 	f   *os.File
 	log io.Writer
-	rs  *resampler
 
 	in      []float32
-	out     []float32
 	buf     []byte
 	primed  bool
 	dropped int // blocks dropped in the current overflow, 0 when flowing
 }
 
 func newPdnRxWriter(f *os.File, log io.Writer) *pdnRxWriter {
-	return &pdnRxWriter{f: f, log: log, rs: newResampler(audio.SampleRate, pdnPipeRate)}
+	return &pdnRxWriter{f: f, log: log}
 }
 
 func (w *pdnRxWriter) Write(p []byte) (int, error) {
@@ -256,7 +255,6 @@ func (w *pdnRxWriter) Write(p []byte) (int, error) {
 	for i := 0; i+1 < len(p); i += 2 {
 		w.in = append(w.in, float32(int16(binary.LittleEndian.Uint16(p[i:])))/32768)
 	}
-	w.out = w.rs.Process(w.in, w.out[:0])
 
 	if !w.primed {
 		// Start with a cushion of silence so a late tick is absorbed by
@@ -282,7 +280,7 @@ func (w *pdnRxWriter) Write(p []byte) (int, error) {
 		fmt.Fprintf(w.log, "net-sim: pdn-soundmodem audio input flowing again after %d dropped blocks\n", w.dropped)
 		w.dropped = 0
 	}
-	if err := w.writeFloats(w.out); err != nil {
+	if err := w.writeFloats(w.in); err != nil {
 		return 0, err
 	}
 	return len(p), nil
@@ -299,23 +297,21 @@ func (w *pdnRxWriter) writeFloats(v []float32) error {
 
 func (w *pdnRxWriter) Close() error { return w.f.Close() }
 
-// pdnTxReader turns pdn's 48 kHz float32 transmit FIFO into the 44.1 kHz
-// int16 byte stream the router's txReader expects.
+// pdnTxReader turns pdn's float32 transmit FIFO into the int16 byte stream
+// the router's txReader expects.
 type pdnTxReader struct {
-	f  *os.File
-	rs *resampler
+	f *os.File
 
 	raw     []byte
 	carry   []byte // a partial float left over from the last read
 	flt     []float32
-	res     []float32
 	out     []byte
 	emitted int // bytes emitted in the current burst
 	inBurst bool
 }
 
 func newPdnTxReader(f *os.File) *pdnTxReader {
-	return &pdnTxReader{f: f, rs: newResampler(pdnPipeRate, audio.SampleRate), raw: make([]byte, 32*1024)}
+	return &pdnTxReader{f: f, raw: make([]byte, 32*1024)}
 }
 
 func (r *pdnTxReader) Read(p []byte) (int, error) {
@@ -342,21 +338,18 @@ func (r *pdnTxReader) Read(p []byte) (int, error) {
 			r.flt = append(r.flt, math.Float32frombits(binary.LittleEndian.Uint32(data[i:])))
 		}
 		r.carry = append(r.carry[:0], data[whole:]...)
-		r.res = r.rs.Process(r.flt, r.res[:0])
-		r.appendS16(r.res)
+		r.appendS16(r.flt)
 	}
 	n := copy(p, r.out)
 	r.out = r.out[n:]
 	return n, nil
 }
 
-// endBurst pushes out the resampler's lookahead and pads the burst to a
-// whole router block, so none of it waits for the next transmission.
+// endBurst pads the burst to a whole router block, so none of it waits
+// for the next transmission.
 func (r *pdnTxReader) endBurst() {
 	r.inBurst = false
 	r.carry = r.carry[:0]
-	r.res = r.rs.Flush(r.res[:0])
-	r.appendS16(r.res)
 	if rem := r.emitted % audio.BlockBytes; rem != 0 {
 		r.out = append(r.out, make([]byte, audio.BlockBytes-rem)...)
 	}

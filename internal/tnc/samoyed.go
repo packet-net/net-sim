@@ -19,6 +19,7 @@ import (
 func samoyedConf(s Spec) string {
 	var b []byte
 	b = appendf(b, "ADEVICE - udp:127.0.0.1:%d\n", s.RxAudioUDPPort)
+	b = appendf(b, "ARATE %d\n", SampleRate)
 	b = append(b, "ACHANNELS 1\n"...)
 	b = append(b, "CHANNEL 0\n"...)
 	b = appendf(b, "MYCALL %s\n", deriveCallsign(s.NodeID))
@@ -100,7 +101,7 @@ func startSamoyed(ctx context.Context, s Spec) (*Child, error) {
 // udpReader adapts a UDPConn to io.Reader by concatenating successive
 // datagram payloads into a byte stream. The router slices that stream
 // into BlockBytes blocks itself; samoyed's UDP_AUDIO_OUT_BUF_MAXLEN
-// (1472) doesn't align with our 882-byte blocks, so we have to splice.
+// (1472) doesn't align with our 960-byte blocks, so we have to splice.
 type udpReader struct {
 	conn *net.UDPConn
 	buf  []byte

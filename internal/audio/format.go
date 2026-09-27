@@ -5,15 +5,17 @@ package audio
 
 import "math"
 
-// SampleRate matches samoyed's default. Kept here so the mixer code is
-// self-contained.
-const SampleRate = 44100
+// SampleRate is the simulator's audio rate. 48 kHz is pdn-soundmodem's
+// native rate, what USB sound cards on real stations run at, and the rate
+// the FM receive-path measurements the channel model is calibrated against
+// were taken at. samoyed and direwolf are told to use it (ARATE).
+const SampleRate = 48000
 
 // BlockSamples is the audio block size used for routing decisions, in
-// samples. 10 ms at 44.1 kHz = 441 samples = 882 bytes. Small enough that
+// samples. 10 ms at 48 kHz = 480 samples = 960 bytes. Small enough that
 // PTT-on/off transitions are tracked at frame-level granularity; large
 // enough that goroutine scheduling overhead doesn't dominate.
-const BlockSamples = 441
+const BlockSamples = 480
 
 // BlockBytes is BlockSamples × 2 (mono int16 LE).
 const BlockBytes = BlockSamples * 2

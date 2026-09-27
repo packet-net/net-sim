@@ -27,7 +27,7 @@ const wavHeaderBytes = 44
 
 // ErrWAVFull is returned once a WAV file reaches the format's 4 GiB limit
 // (a 32-bit size field). The file is left valid up to that point; at
-// 44.1 kHz mono that is about 13.5 hours, stereo about 6.8.
+// 48 kHz mono that is about 12.4 hours, stereo about 6.2.
 var ErrWAVFull = errors.New("wav: file reached the 4 GiB WAV size limit")
 
 // maxWAVData is the largest data chunk whose RIFF size (36 + data) still

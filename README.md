@@ -289,7 +289,7 @@ per-block RX ticker, the composite recorder's ticker, and the TX
 watchdog's tick and silence window (silence detection has to scale with
 the audio rate or `tx_end` events would fire mid-transmission). A 60 s
 exchange completes in 60/N wall-clock seconds; recordings still come out
-as normal 44.1 kHz files whose time axis is *sim* time.
+as normal 48 kHz files whose time axis is *sim* time.
 
 **Fidelity caveat — read before trusting numbers from a scaled run.**
 Only the router's clocks scale. The TNC child processes (samoyed /
@@ -363,9 +363,6 @@ pdn-to-samoyed afsk1200 link.
 
 Things to know:
 
-- pdn-soundmodem runs at 48 kHz and the router at 44.1 kHz, so each pdn port
-  has a resampler in each direction. It is flat to about 18 kHz, so it
-  doesn't limit any FM mode.
 - pdn-soundmodem reads its audio in real time, so `tnc: pdn` needs
   `time_scale: 1`; config validation refuses anything else. About 40 ms of
   audio is queued ahead of it to absorb scheduling jitter, which adds that
@@ -406,7 +403,7 @@ own mode names instead (see above).
 
 Both `sim-router` and `sim-web` can write per-port WAV recordings of
 every transmission and every receive-side mix. Files are mono 16-bit LE
-PCM at 44.1 kHz — the simulator's native format, so recording is a
+PCM at 48 kHz, the simulator's native format, so recording is a
 straight tee with no resampling.
 
 **`sim-router`** — pass `-record DIR`. Recording starts as soon as the
@@ -442,10 +439,10 @@ checkbox appears next to Start/Stop. Toggle it any time:
 The toggle survives Apply &amp; restart, so you can edit the topology and
 keep recording across the restart with one click.
 
-**Disk usage**: ~88 KB/s per stream. A 6-node mesh with two streams per
+**Disk usage**: about 96 KB/s per stream. A 6-node mesh with two streams per
 port is about 1 MB/s, 3.5 GB/hour. WAV size is capped by a 32-bit
-chunk-size field: a mono file fills at about 13.5 hours and a stereo
-composite at about 6.8. A full file stops growing (with a warning) and
+chunk-size field: a mono file fills at about 12.4 hours and a stereo
+composite at about 6.2. A full file stops growing (with a warning) and
 stays valid; there is no rotation.
 
 Recording never holds up the simulation: each file has its own writer and

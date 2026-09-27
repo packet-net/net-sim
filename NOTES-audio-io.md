@@ -37,12 +37,11 @@ UDP out** for every samoyed instance. Picked stdin over UDP for input because
 backpressure is well-defined (kernel pipe buffer flow controls the router) and
 because the router can stop writing to drop a port out of the bus cleanly.
 
-Audio format: **mono / 44100 Hz / signed 16-bit LE** (samoyed's
-`DEFAULT_SAMPLES_PER_SEC = 44100`, `DEFAULT_NUM_CHANNELS = 1`,
-`DEFAULT_BITS_PER_SAMPLE = 16`). The plan's tentative 48 kHz didn't survive
-contact — samoyed defaults to 44.1 kHz and the gen_packets / atest test
-fixtures all use 44.1 kHz. We follow samoyed's default rather than upsampling
-ourselves.
+Audio format: **mono / 48000 Hz / signed 16-bit LE**. This started at
+samoyed's default of 44.1 kHz; it moved to 48 kHz in 2026-09 (see
+docs/fm-channel-plan.md) because pdn-soundmodem, real stations' USB sound
+cards and the FM channel model's calibration data are all 48 kHz. samoyed and
+direwolf are set to it with `ARATE 48000` in their per-port configs.
 
 Stock Dire Wolf 1.8.1 (`apt install direwolf`) was kept as a reference —
 useful for A/B sanity checks — but is **not** used at runtime. It only links

@@ -1523,7 +1523,7 @@ window.addEventListener('resize', () => { renderStatic(); });
 // ============================================================
 //
 // Click a port's ♪ icon → open WebSocket to /api/audio?port=&side=,
-// receive raw int16 LE 44.1 kHz mono blocks, feed a single playback
+// receive raw int16 LE 48 kHz mono blocks, feed a single playback
 // node that drains them into the AudioContext at sample rate. Secure
 // contexts (HTTPS / localhost) use an AudioWorklet; plain HTTP falls
 // back to a ScriptProcessorNode (see ensureAudioCtx). Only one port at
@@ -1569,10 +1569,10 @@ const listenState = {
 
 async function ensureAudioCtx() {
   if (listenState.ctx) return listenState.ctx;
-  // Net-sim is 44.1 kHz int16 mono. Some browsers will resample to
+  // Net-sim is 48 kHz int16 mono. Some browsers will resample to
   // their device rate; that's fine, samoyed's tones survive it.
   const ctx = new (window.AudioContext || window.webkitAudioContext)({
-    sampleRate: 44100,
+    sampleRate: 48000,
   });
 
   if (ctx.audioWorklet) {
@@ -1605,7 +1605,7 @@ async function ensureAudioCtx() {
     listenState.feed = (f32) => {
       // Cap the backlog (~2 s) so a backgrounded tab whose audio clock
       // has paused can't grow this array without bound.
-      const MAX = 44100 * 2;
+      const MAX = 48000 * 2;
       if (q.length > MAX) q = q.subarray(q.length - MAX);
       const merged = new Float32Array(q.length + f32.length);
       merged.set(q);

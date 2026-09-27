@@ -21,6 +21,7 @@ import (
 func direwolfConf(s Spec) string {
 	var b []byte
 	b = appendf(b, "ADEVICE - %s\n", direwolfPCMName)
+	b = appendf(b, "ARATE %d\n", SampleRate)
 	b = append(b, "ACHANNELS 1\n"...)
 	b = append(b, "CHANNEL 0\n"...)
 	b = appendf(b, "MYCALL %s\n", deriveCallsign(s.NodeID))
