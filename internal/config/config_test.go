@@ -380,3 +380,54 @@ links: []
 		}
 	}
 }
+
+func TestCaptureDB(t *testing.T) {
+	base := `
+nodes:
+  - id: a
+    ports:
+      - { id: vhf, modem: { mode: afsk1200 }, kiss_port: 8001 }
+links: []
+`
+	for _, c := range []struct {
+		prefix string
+		want   float64
+	}{{"", 6}, {"capture_db: 0\n", 0}, {"capture_db: 3\n", 3}} {
+		cfg, err := Parse(strings.NewReader(c.prefix + base))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.CaptureDB != c.want {
+			t.Errorf("%q: capture_db = %g, want %g", c.prefix, cfg.CaptureDB, c.want)
+		}
+	}
+}
+
+func TestRejectsUnusableNumbers(t *testing.T) {
+	base := `
+nodes:
+  - id: a
+    ports:
+      - { id: vhf, modem: { mode: afsk1200 }, kiss_port: 8001 }
+  - id: b
+    ports:
+      - { id: vhf, modem: { mode: afsk1200 }, kiss_port: 8002 }
+`
+	for _, bad := range []string{
+		"time_scale: 1e9\n",
+		"time_scale: .inf\n",
+		"time_scale: .nan\n",
+		"capture_db: .nan\n",
+		"links:\n  - { from: a.vhf, to: b.vhf, loss_db: .nan }\n",
+	} {
+		yml := base
+		if strings.HasPrefix(bad, "links") {
+			yml += bad
+		} else {
+			yml = bad + base + "links: []\n"
+		}
+		if _, err := Parse(strings.NewReader(yml)); err == nil {
+			t.Errorf("%q: accepted, want an error", strings.TrimSpace(bad))
+		}
+	}
+}

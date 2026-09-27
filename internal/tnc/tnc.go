@@ -135,6 +135,12 @@ func Start(ctx context.Context, s Spec) (*Child, error) {
 	if err := SupportedMode(s.Backend, s.Modem); err != nil {
 		return nil, err
 	}
+	// The readiness check only dials the port, so a port some other
+	// process already holds would pass it and the test traffic would go
+	// to that process. Refuse up front instead.
+	if err := portFree(s.KissPort); err != nil {
+		return nil, err
+	}
 	switch s.Backend {
 	case "", BackendSamoyed:
 		return startSamoyed(ctx, s)

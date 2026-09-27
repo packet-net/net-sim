@@ -41,7 +41,7 @@ func (a ActiveTX) Level() float64 { return -a.LossDB }
 // level difference exceeds the capture ratio (≈6 dB on narrow-band 2m FM).
 // The default config sets CaptureDB = 6.0.
 //
-// Mixer is per-port (one node's two ports have independent paths).
+// One Mixer is shared by every receiving port; it holds no per-port state.
 type Mixer struct {
 	CaptureDB     float64
 	CollisionMode string // "silence" | "sum" | "noise"
@@ -54,11 +54,9 @@ type Mixer struct {
 	rng   *rand.Rand
 }
 
-// NewMixer constructs a mixer. captureDB defaults to 6 if zero.
+// NewMixer constructs a mixer. captureDB 0 means the strongest signal
+// always captures (the config supplies 6 when capture_db is absent).
 func NewMixer(captureDB float64, linearSum bool, collisionMode string) *Mixer {
-	if captureDB == 0 {
-		captureDB = 6
-	}
 	return &Mixer{
 		CaptureDB:     captureDB,
 		CollisionMode: collisionMode,
@@ -221,7 +219,7 @@ func (m *Mixer) AddNoise(b Block, noiseDB float64) {
 const (
 	fmQuietingMargin = 6.0  // dB headroom before quieting kicks in
 	fmQuietingSlope  = 2.0  // dB of noise drop per dB of SNR above margin
-	fmQuietingFloor  = 60.0 // never quieter than this many dB below FS
+	fmQuietingFloor  = 60.0 // quieting stops at this many dB below FS
 )
 
 // AddNoiseQuieted is AddNoise with FM threshold quieting baked in.
@@ -244,10 +242,11 @@ func (m *Mixer) AddNoiseQuieted(b Block, noiseDB float64) {
 	if signalPeak > 0 && noiseAmp > 0 {
 		snrDB := 20 * math.Log10(float64(signalPeak)/noiseAmp)
 		if snrDB > fmQuietingMargin {
+			// Quieting only ever lowers the noise. A configured floor
+			// already below fmQuietingFloor stays where it is rather
+			// than being raised to it.
 			effectiveDB += (snrDB - fmQuietingMargin) * fmQuietingSlope
-			if effectiveDB > fmQuietingFloor {
-				effectiveDB = fmQuietingFloor
-			}
+			effectiveDB = math.Max(noiseDB, math.Min(effectiveDB, fmQuietingFloor))
 		}
 	}
 	m.AddNoise(b, effectiveDB)

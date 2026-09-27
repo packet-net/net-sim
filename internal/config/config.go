@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"regexp"
 
@@ -219,12 +220,26 @@ func ParseBytes(b []byte) (*Config, error) {
 // Parse reads YAML from r with strict decoding (unknown fields are errors)
 // and runs cross-link validation.
 func Parse(r io.Reader) (*Config, error) {
-	dec := yaml.NewDecoder(r)
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
 
 	cfg := &Config{}
 	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("yaml: %w", err)
+	}
+
+	// capture_db: 0 is meaningful (the strongest signal always captures),
+	// so only an absent key takes the default.
+	var present struct {
+		CaptureDB *float64 `yaml:"capture_db"`
+	}
+	_ = yaml.Unmarshal(raw, &present)
+	if present.CaptureDB == nil {
+		cfg.CaptureDB = defaultCaptureDB
 	}
 
 	cfg.applyDefaults()
@@ -238,9 +253,6 @@ func (c *Config) applyDefaults() {
 	if c.MixerMode == "" {
 		c.MixerMode = MixerFMCapture
 	}
-	if c.CaptureDB == 0 {
-		c.CaptureDB = 6.0
-	}
 	if c.CollisionMode == "" {
 		c.CollisionMode = CollisionSilence
 	}
@@ -248,6 +260,14 @@ func (c *Config) applyDefaults() {
 		c.TimeScale = 1.0
 	}
 }
+
+// defaultCaptureDB is the FM capture ratio used when capture_db is absent.
+const defaultCaptureDB = 6.0
+
+// maxTimeScale bounds time_scale. At 100 x the router's 10 ms block ticker
+// is already 100 us, beyond which the TNCs can't keep up anyway, and a
+// huge value would round the tickers to zero and panic.
+const maxTimeScale = 100
 
 // PortRef is a (node, port) handle resolved from a "node.port" string.
 type PortRef struct {
@@ -273,11 +293,19 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("config: unknown collision_mode %q", c.CollisionMode)
 	}
+	for name, v := range map[string]float64{"capture_db": c.CaptureDB, "default_noise_db": c.DefaultNoiseDB, "time_scale": c.TimeScale} {
+		if !finite(v) {
+			return fmt.Errorf("config: %s must be a finite number, got %g", name, v)
+		}
+	}
 	if c.CaptureDB < 0 {
 		return fmt.Errorf("config: capture_db must be >= 0, got %g", c.CaptureDB)
 	}
 	if c.TimeScale < 1 {
 		return fmt.Errorf("config: time_scale must be >= 1.0, got %g (slower-than-real-time is not supported)", c.TimeScale)
+	}
+	if c.TimeScale > maxTimeScale {
+		return fmt.Errorf("config: time_scale must be <= %d, got %g", maxTimeScale, c.TimeScale)
 	}
 
 	// Build a lookup table and check ID uniqueness.
@@ -321,6 +349,9 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("config: kiss_port %d used by both %s and %s.%s", p.KissPort, existing, n.ID, p.ID)
 			}
 			usedKissPorts[p.KissPort] = n.ID + "." + p.ID
+			if !finite(p.NoiseDB) {
+				return fmt.Errorf("config: %s.%s: noise_db must be a finite number", n.ID, p.ID)
+			}
 
 			switch p.TNC {
 			case "", TNCSamoyed, TNCDirewolf:
@@ -368,6 +399,9 @@ func (c *Config) Validate() error {
 		if !fromModem.Equivalent(toModem) {
 			return fmt.Errorf("config: link %s -> %s: modem mismatch (%s vs %s)", fromRef, toRef, fromModem.Mode, toModem.Mode)
 		}
+		if !finite(l.LossDB) || !finite(l.NoiseDB) || !finite(l.SquelchOpenMS) {
+			return fmt.Errorf("config: link %s -> %s: loss_db, noise_db and squelch_open_ms must be finite numbers", fromRef, toRef)
+		}
 		if l.LossDB < 0 {
 			return fmt.Errorf("config: link %s -> %s: loss_db must be >= 0", fromRef, toRef)
 		}
@@ -383,6 +417,8 @@ func (c *Config) Validate() error {
 
 	return nil
 }
+
+func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 func parsePortRef(s string) (PortRef, error) {
 	for i, c := range s {

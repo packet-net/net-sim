@@ -49,6 +49,9 @@ type compositeRecorder struct {
 
 	frames atomic.Int64 // interleaved frames written (one per block/channel-group)
 
+	failed     atomic.Bool // a write failed; feed stops queueing
+	overflowed atomic.Bool // currently overflowing; warn once per episode
+
 	done     chan struct{} // closed by stop() to request a graceful drain+close
 	stopped  chan struct{} // closed by the run goroutine when it has fully exited
 	stopOnce sync.Once
@@ -133,6 +136,9 @@ func newCompositeRecorder(base string, channels []config.PortRef, timeScale floa
 // the only contention is with the draining run goroutine, handled by the
 // buffered channel.
 func (cr *compositeRecorder) feed(ref config.PortRef, blk audio.Block) {
+	if cr.failed.Load() {
+		return
+	}
 	i, ok := cr.idx[ref]
 	if !ok {
 		return
@@ -140,6 +146,7 @@ func (cr *compositeRecorder) feed(ref config.PortRef, blk audio.Block) {
 	q := cr.queues[i]
 	select {
 	case q <- blk:
+		cr.overflowed.Store(false)
 		return
 	default:
 	}
@@ -153,7 +160,9 @@ func (cr *compositeRecorder) feed(ref config.PortRef, blk audio.Block) {
 	case q <- blk:
 	default:
 	}
-	cr.logger.Warn("composite: queue overflow, dropping oldest", "port", ref)
+	if !cr.overflowed.Swap(true) {
+		cr.logger.Warn("composite: queue overflow, dropping oldest", "port", ref)
+	}
 }
 
 // run is the real-time pacer. One block per channel per tick, interleaved
@@ -204,6 +213,7 @@ func (cr *compositeRecorder) writeFrame() bool {
 	blocks, _ := cr.collect()
 	if _, err := cr.writer.Write(audio.Interleave(blocks)); err != nil {
 		cr.setErr(err)
+		cr.failed.Store(true)
 		cr.logger.Warn("composite: write failed, stopping", "file", cr.path, "err", err)
 		return false
 	}
@@ -301,6 +311,9 @@ func (r *Router) StartCompositeRecording(ports []config.PortRef) (string, error)
 	defer r.compositeMu.Unlock()
 	if r.opts.RecordDir == "" {
 		return "", errors.New("composite: no RecordDir configured")
+	}
+	if r.compositeStopped {
+		return "", errors.New("composite: the router has stopped")
 	}
 	if r.composite.Load() != nil {
 		return "", errors.New("composite: already recording")

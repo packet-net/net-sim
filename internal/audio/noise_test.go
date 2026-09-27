@@ -129,3 +129,41 @@ func TestAddNoiseZeroIsNop(t *testing.T) {
 		}
 	}
 }
+
+// A receiver configured quieter than the quieting floor must not get
+// noisier when a signal arrives.
+func TestAddNoiseQuietedNeverRaisesNoise(t *testing.T) {
+	m := NewMixer(6, false, "silence")
+	sig := Silence()
+	for i := 0; i+1 < len(sig); i += 2 {
+		v := int16(16000)
+		if (i/2)%2 == 1 {
+			v = -16000
+		}
+		sig[i], sig[i+1] = byte(uint16(v)), byte(uint16(v)>>8)
+	}
+	idle := Silence()
+	m.AddNoiseQuieted(idle, 70)
+	withSig := append(Block(nil), sig...)
+	m.AddNoiseQuieted(withSig, 70)
+	// Noise alone on the signal block = difference from the clean signal.
+	var sum float64
+	for i := 0; i+1 < len(sig); i += 2 {
+		d := float64(int16(uint16(withSig[i])|uint16(withSig[i+1])<<8)) - float64(int16(uint16(sig[i])|uint16(sig[i+1])<<8))
+		sum += d * d
+	}
+	noiseUnderSignal := math.Sqrt(sum / float64(len(sig)/2))
+	if noiseUnderSignal > rms(idle)*1.5 {
+		t.Errorf("noise under a strong signal (rms %.1f) is louder than idle noise (rms %.1f)", noiseUnderSignal, rms(idle))
+	}
+}
+
+func TestZeroCaptureDBCapturesAnyMargin(t *testing.T) {
+	m := NewMixer(0, false, "silence")
+	a := Silence()
+	a[0] = 100
+	_, dec := m.Mix([]ActiveTX{{Block: a, LossDB: 0}, {Block: a, LossDB: 0.5}})
+	if dec != MixCapture {
+		t.Errorf("capture_db 0 with a 0.5 dB margin: decision %v, want capture", dec)
+	}
+}

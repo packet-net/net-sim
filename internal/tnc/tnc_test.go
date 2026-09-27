@@ -1,7 +1,10 @@
 package tnc
 
 import (
+	"context"
+	"net"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/packethacking/net-sim/internal/config"
@@ -109,4 +112,17 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+func TestStartRefusesKissPortInUse(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	port := l.Addr().(*net.TCPAddr).Port
+	_, err = Start(context.Background(), Spec{NodeID: "a", PortID: "p", Modem: config.Modem{Mode: config.ModeAFSK1200}, KissPort: port, SamoyedBin: "/nonexistent"})
+	if err == nil || !strings.Contains(err.Error(), "already in use") {
+		t.Fatalf("want an in-use error, got %v", err)
+	}
 }
