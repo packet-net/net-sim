@@ -3,8 +3,9 @@
 A software-only simulator for testing AX.25/IL2P link-layer behaviour,
 BPQ routing decisions, collision recovery and hidden-node interactions
 without real radios. Multiple
-[samoyed](https://github.com/doismellburning/samoyed) instances act as
-TNC+radio combinations; an audio router (`sim-router`) implements per-link
+[samoyed](https://github.com/doismellburning/samoyed) instances (or Dire Wolf,
+or [pdn-soundmodem](https://github.com/packet-net/pdn-soundmodem) for modes
+such as qpsk3600) act as TNC+radio combinations; an audio router (`sim-router`) implements per-link
 topology and FM capture-effect mixing between them.
 
 The primary target is **2m FM AX.25** behaviour. SSB and other modulation
@@ -277,6 +278,9 @@ when you meant `baud`) is an error at startup, not a silent default.
 > practice `time_scale` is currently only sound for receive-path/mixer
 > experiments; ACKMODE pacing or throughput measurements need `time_scale: 1`
 > until the TNC grows a matching speed factor (tracked upstream).
+>
+> Ports with `tnc: pdn` can't run scaled at all (pdn-soundmodem reads its
+> audio in real time), so a config with any pdn port must keep `time_scale: 1`.
 
 `time_scale: N` (or the `-time-scale N` flag on `sim-router`, which
 overrides the config) runs the whole simulation N× faster than wall
@@ -314,21 +318,78 @@ ports:
     tnc: direwolf       # stock direwolf 1.8 from apt
     modem: { mode: afsk1200 }
     kiss_port: 8002
+  - id: fm
+    tnc: pdn            # pdn-soundmodem, for its own modes
+    modem: { mode: qpsk3600 }
+    kiss_port: 8003
 ```
 
 | `tnc` | Audio TX path | Notes |
 |---|---|---|
 | `samoyed` (default) | UDP datagrams | Clean and direct. |
-| `direwolf` | ALSA `file` plugin → named pipe | Workaround until upstream Dire Wolf gains UDP audio out. The router writes a per-port `.asoundrc` and a FIFO into `WorkDir`. |
+| `direwolf` | ALSA `file` plugin -> named pipe | Workaround until upstream Dire Wolf gains UDP audio out. The router writes a per-port `.asoundrc` and a FIFO into `WorkDir`. |
+| `pdn` | pdn-soundmodem's `pipe:` device (two FIFOs) | Adds pdn-soundmodem's modes. See below. |
 
-Both backends accept the same modem directives (`MODEM 9600`, `IL2PTX 1`,
-etc.) in the per-port config file, so a mixed-TNC config works fine —
-link compatibility is decided by modem alone, not by which TNC is on
-either end.
+samoyed and direwolf accept the same modem directives (`MODEM 9600`,
+`IL2PTX 1`, etc.), and pdn-soundmodem's `afsk1200` and `fsk9600` are the
+same signals, so a mixed-TNC config works fine: link compatibility is
+decided by modem alone, not by which TNC is on either end.
+
+#### pdn-soundmodem (`tnc: pdn`)
+
+[pdn-soundmodem](https://github.com/packet-net/pdn-soundmodem) brings the
+modes samoyed doesn't have, notably the FM ones: `qpsk3600` (7200 bps in one
+FM voice channel), `fsk4800-il2p`, `fsk9600-il2p`, `c4fsk9600`,
+`c4fsk19200` and the `ofdm-fm-*` family. With `tnc: pdn`, `mode` takes any
+mode name `pdn-soundmodem --help` lists, and net-sim checks the name against
+that list before starting anything. `afsk1200` and `gfsk9600` work too
+(net-sim's `gfsk9600` is pdn's `fsk9600`), and talk to samoyed and direwolf
+ports. `il2p` and `bpsk` are refused on pdn ports: use pdn's own names
+(`afsk1200-il2p-nocrc`, `bpsk1200`, ...), which are only compatible with other
+pdn ports.
+
+Install it from the packet-net apt repository (the Docker image and
+`install.sh` already include it):
+
+```
+curl -fsSL https://packet-net.github.io/apt/pubkey.asc | sudo gpg --dearmor -o /usr/share/keyrings/packet-net.gpg
+echo "deb [signed-by=/usr/share/keyrings/packet-net.gpg] https://packet-net.github.io/apt ./" | sudo tee /etc/apt/sources.list.d/packet-net.list
+sudo apt update && sudo apt install pdn-soundmodem
+```
+
+`sim-router` and `sim-web` find it on `$PATH`; `-pdn PATH` points at another
+build. `make demo-pdn-fm-modes` runs qpsk3600 and c4fsk9600 pairs plus a
+pdn-to-samoyed afsk1200 link.
+
+Things to know:
+
+- pdn-soundmodem runs at 48 kHz and the router at 44.1 kHz, so each pdn port
+  has a resampler in each direction. It is flat to about 18 kHz, so it
+  doesn't limit any FM mode.
+- pdn-soundmodem reads its audio in real time, so `tnc: pdn` needs
+  `time_scale: 1`; config validation refuses anything else. About 40 ms of
+  audio is queued ahead of it to absorb scheduling jitter, which adds that
+  much receive latency.
+- pdn's receivers need a moment of audio after start-up before they decode
+  reliably, so with any pdn port the router feeds audio for a second before
+  it reports itself started.
+- Each port runs `pdn-soundmodem --device pipe:... --kiss PORT --modem 0:MODE`
+  with no config file, so pdn defaults apply: TXDELAY 300 ms until the host
+  sets it over KISS, and carrier sense from pdn's in-band energy detector.
+- With no radio to ask, pdn judges "channel busy" from the received audio.
+  With `default_noise_db` or `noise_db` set, the router models an
+  open-squelch receiver (hiss that drops under a signal), and pdn reads the
+  hiss coming back as a signal, just as it does on air: a station can hold
+  its transmissions for ten seconds or more after hearing traffic, including
+  its first one after start-up. c4fsk modes also miss frames on that
+  channel (pdn issue #518). Leave the noise off for plain protocol testing.
+- The channel is still the router's: flat audio, no FM pre-emphasis or radio
+  filtering. Modes that are sensitive to a real FM audio path (pdn's docs
+  flag c4fsk over real radios) will look better here than on air.
 
 ### Modem catalogue
 
-| `mode` | Required params | Status (current samoyed) |
+| `mode` | Required params | Status (samoyed / direwolf) |
 |---|---|---|
 | `afsk1200` | none | ✅ supported. Default workhorse. |
 | `gfsk9600` | none | ✅ supported. Auto-selected for 9600 baud + G3RUH. |
@@ -336,9 +397,10 @@ either end.
 | `il2p` | `inner` (afsk1200 / gfsk9600), `fec` (`strong`/`weak`) | ✅ supported (FEC strength only — see Known limitations). |
 
 Modes the YAML accepts but samoyed can't actually run *fail at startup
-with a clear error*. Adding a new mode is config plumbing — see the
-translation table in `internal/samoyed/child.go` and the source-of-truth
-table in `NOTES-audio-io.md`.
+with a clear error*. Adding a new mode is config plumbing: see the
+translation table in `internal/tnc/tnc.go` and the source-of-truth
+table in `NOTES-audio-io.md`. Ports with `tnc: pdn` take pdn-soundmodem's
+own mode names instead (see above).
 
 ## Recording runs
 
@@ -536,7 +598,7 @@ round-trip test lives in `internal/tnc/ackmode_test.go`.
 - `linear_sum` / `sum` mixer modes — accepted in the YAML, only
   `fm_capture` is functional (`collision_mode: silence` and `noise` both
   work; `sum` is a stub).
-- Modem modes beyond what samoyed currently supports.
+- Modem modes beyond what samoyed and pdn-soundmodem support.
 
 ## Layout
 
@@ -544,7 +606,7 @@ round-trip test lives in `internal/tnc/ackmode_test.go`.
 cmd/sim-router/            - CLI entrypoint
 cmd/sim-web/               - integrated web UI; embeds the router
 internal/config/           - YAML parsing + validation (strict)
-internal/tnc/              - per-port samoyed / direwolf process management
+internal/tnc/              - per-port samoyed / direwolf / pdn-soundmodem process management
                              + the modem-mode → config-directive translation
 internal/audio/            - PCM types, FM-capture mixer, noise generator,
                              WAV recorder

@@ -2,6 +2,7 @@ package tnc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -36,8 +37,10 @@ func deriveCallsign(nodeID string) string {
 }
 
 // waitListening blocks until a TCP listener is accepting on 127.0.0.1:port,
-// or until ctx is cancelled, or until timeout elapses.
-func waitListening(ctx context.Context, port int, timeout time.Duration) error {
+// or until ctx is cancelled, the process exits (exited closes), or timeout
+// elapses. Without the exit check a TNC that refuses its config costs the
+// whole timeout and then reports "not listening" instead of "it exited".
+func waitListening(ctx context.Context, port int, timeout time.Duration, exited <-chan struct{}) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		if time.Now().After(deadline) {
@@ -51,6 +54,8 @@ func waitListening(ctx context.Context, port int, timeout time.Duration) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-exited:
+			return errors.New("the TNC exited during start-up (its log lines above say why)")
 		case <-time.After(100 * time.Millisecond):
 		}
 	}

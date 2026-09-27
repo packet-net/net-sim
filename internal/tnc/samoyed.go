@@ -84,14 +84,13 @@ func startSamoyed(ctx context.Context, s Spec) (*Child, error) {
 		cmd:      cmd,
 		stdin:    stdin,
 		txReader: &udpReader{conn: udpConn},
-		exitC:    make(chan error, 1),
 		cleanups: []func() error{
 			func() error { return udpConn.Close() },
 		},
 	}
-	go func() { c.exitC <- cmd.Wait() }()
+	c.watch()
 
-	if err := waitListening(ctx, s.KissPort, 5*time.Second); err != nil {
+	if err := waitListening(ctx, s.KissPort, 5*time.Second, c.exited); err != nil {
 		_ = c.Stop()
 		return nil, fmt.Errorf("wait for kiss tcp %d: %w", s.KissPort, err)
 	}

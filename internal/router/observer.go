@@ -167,7 +167,9 @@ type observerWriter struct {
 //
 // Group 1: src call (with optional SSID)
 // Group 2: dest (call or alias)
-var frameLine = regexp.MustCompile(`\[0L\]\s+([A-Z0-9][A-Z0-9-]{1,9})>([A-Z0-9][A-Z0-9-]{0,9})`)
+//
+// pdn-soundmodem logs the same thing as "tx[0] qpsk3600 QA0HUB-7>NODES 136 bytes".
+var frameLine = regexp.MustCompile(`(?:\[0L\]|\btx\[\d+\] [a-z0-9-]+)\s+([A-Z0-9][A-Z0-9-]{1,9})>([A-Z0-9][A-Z0-9-]{0,9})`)
 
 func (w *observerWriter) Write(b []byte) (int, error) {
 	w.mu.Lock()

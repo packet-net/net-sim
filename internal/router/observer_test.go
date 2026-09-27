@@ -87,3 +87,26 @@ func TestObserverPartialLines(t *testing.T) {
 		t.Errorf("partial-line glue failed: %v", got)
 	}
 }
+
+func TestObserverParsesPdnSoundmodemTX(t *testing.T) {
+	o := NewObserver()
+	ref := config.PortRef{NodeID: "a", PortID: "fm"}
+	w := o.WriterFor(ref)
+	in := strings.Join([]string{
+		"tx[0] qpsk3600 QA0HUB-7>NODES 136 bytes",
+		"rx[0] qpsk3600-il2pc QA0ABN-7>NODES 136 bytes  crc ok  fec 0  snr 69.6 dB  -4 Hz",
+		"tx[0] afsk1200 QA0HUB-1>BBS 40 bytes",
+		"",
+	}, "\n")
+	if _, err := w.Write([]byte(in)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	po := o.Snapshot()["a.fm"]
+	got := map[string]int{}
+	for _, c := range po.Calls {
+		got[c.Call] = c.Frames
+	}
+	if len(got) != 2 || got["QA0HUB-7"] != 1 || got["QA0HUB-1"] != 1 {
+		t.Fatalf("want QA0HUB-7 and QA0HUB-1 once each (and no rx lines), got %v", got)
+	}
+}

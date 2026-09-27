@@ -24,7 +24,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -36,6 +35,7 @@ import (
 	"github.com/packethacking/net-sim/internal/config"
 	"github.com/packethacking/net-sim/internal/events"
 	"github.com/packethacking/net-sim/internal/router"
+	"github.com/packethacking/net-sim/internal/tnc"
 	"gopkg.in/yaml.v3"
 )
 
@@ -69,6 +69,7 @@ func main() {
 	cfgPath := flag.String("config", "network.yaml", "path to the network YAML")
 	samoyed := flag.String("samoyed", "", "samoyed-direwolf binary (default: discover)")
 	direwolf := flag.String("direwolf", "", "direwolf binary (default: discover)")
+	pdn := flag.String("pdn", "", "pdn-soundmodem binary (default: discover)")
 	workDir := flag.String("workdir", "", "scratch dir for per-port config files / FIFOs (default: temp)")
 	autostart := flag.Bool("autostart", false, "start the router immediately on launch")
 	recordDir := flag.String("record", "", "if set, enables the Record toggle and Composite recording panel in the UI; recordings land under this path")
@@ -83,19 +84,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	samoyedBin, _ := resolveSamoyed(*samoyed)
-	direwolfBin, _ := resolveDirewolf(*direwolf)
+	samoyedBin, _ := tnc.ResolveBinary(tnc.BackendSamoyed, *samoyed)
+	direwolfBin, _ := tnc.ResolveBinary(tnc.BackendDirewolf, *direwolf)
+	pdnBin, _ := tnc.ResolveBinary(tnc.BackendPdn, *pdn)
 	if samoyedBin == "" {
 		logger.Warn("samoyed-direwolf not found; ports with tnc=samoyed (default) won't start")
 	}
 	if direwolfBin == "" {
 		logger.Warn("direwolf not found; ports with tnc=direwolf won't start")
 	}
+	if pdnBin == "" {
+		logger.Info("pdn-soundmodem not found; ports with tnc=pdn won't start")
+	}
 
 	app := &app{
 		cfgPath:     *cfgPath,
 		samoyedBin:  samoyedBin,
 		direwolfBin: direwolfBin,
+		pdnBin:      pdnBin,
 		workDir:     *workDir,
 		recordBase:  *recordDir,
 		rtPriority:  *rtPriority,
@@ -179,6 +185,7 @@ type app struct {
 	cfgPath     string
 	samoyedBin  string
 	direwolfBin string
+	pdnBin      string
 	workDir     string
 	recordBase  string // -record DIR; "" means feature disabled
 	rtPriority  bool   // -rt-priority: renice router + TNC children at start
@@ -765,14 +772,13 @@ func (a *app) start() error {
 	if a.router != nil {
 		return errors.New("already running")
 	}
-	if a.samoyedBin == "" {
-		if bin, err := resolveSamoyed(""); err == nil {
-			a.samoyedBin = bin
-		}
-	}
-	if a.direwolfBin == "" {
-		if bin, err := resolveDirewolf(""); err == nil {
-			a.direwolfBin = bin
+	for b, bin := range map[tnc.Backend]*string{
+		tnc.BackendSamoyed:  &a.samoyedBin,
+		tnc.BackendDirewolf: &a.direwolfBin,
+		tnc.BackendPdn:      &a.pdnBin,
+	} {
+		if *bin == "" {
+			*bin, _ = tnc.ResolveBinary(b, "")
 		}
 	}
 	cfg, err := config.Load(a.cfgPath)
@@ -786,6 +792,7 @@ func (a *app) start() error {
 	r, err := router.Start(ctx, cfg, router.Options{
 		SamoyedBin:    a.samoyedBin,
 		DirewolfBin:   a.direwolfBin,
+		PdnBin:        a.pdnBin,
 		WorkDir:       a.workDir,
 		Logger:        a.logger,
 		RecordDir:     a.recordBase,
@@ -805,7 +812,27 @@ func (a *app) start() error {
 	a.cancel = cancel
 	a.lastErr = ""
 	a.lastTime = time.Now()
+	go a.watchRouter(r)
 	return nil
+}
+
+// watchRouter notices a router that stopped by itself (a TNC child
+// exited) and clears it, so /api/status stops reporting running:true.
+func (a *app) watchRouter(r *router.Router) {
+	<-r.Done()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.router != r {
+		return // stopped deliberately via stop()
+	}
+	_ = r.Stop()
+	a.router = nil
+	if a.cancel != nil {
+		a.cancel()
+		a.cancel = nil
+	}
+	a.lastErr = "simulator stopped: a TNC process exited (see the log)"
+	a.lastTime = time.Now()
 }
 
 func (a *app) stop() error {
@@ -829,43 +856,4 @@ func bootstrapConfig(path string) error {
 		return nil
 	}
 	return os.WriteFile(path, []byte(defaultConfigYAML), 0o644)
-}
-
-func resolveSamoyed(explicit string) (string, error) {
-	if explicit != "" {
-		if _, err := os.Stat(explicit); err != nil {
-			return "", err
-		}
-		return explicit, nil
-	}
-	if p, err := exec.LookPath("samoyed-direwolf"); err == nil {
-		return p, nil
-	}
-	for _, p := range []string{
-		"/opt/samoyed/dist/samoyed-direwolf",
-		"/usr/local/bin/samoyed-direwolf",
-	} {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-	}
-	return "", errors.New("samoyed-direwolf not found in $PATH or common locations")
-}
-
-func resolveDirewolf(explicit string) (string, error) {
-	if explicit != "" {
-		if _, err := os.Stat(explicit); err != nil {
-			return "", err
-		}
-		return explicit, nil
-	}
-	if p, err := exec.LookPath("direwolf"); err == nil {
-		return p, nil
-	}
-	for _, p := range []string{"/usr/bin/direwolf", "/usr/local/bin/direwolf"} {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-	}
-	return "", errors.New("direwolf not found in $PATH or common locations")
 }

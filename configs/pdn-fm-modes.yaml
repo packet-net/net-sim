@@ -1,0 +1,47 @@
+# pdn-soundmodem FM modes (needs pdn-soundmodem installed; tnc: pdn).
+#
+# Three independent pairs on one simulator, each a bidirectional link:
+#   qpsk3600  a <-> b   KISS 8001 / 8002   7200 bps QPSK in one FM voice channel
+#   c4fsk9600 c <-> d   KISS 8003 / 8004   4-level FSK, IL2P+CRC
+#   afsk1200  e <-> f   KISS 8005 / 8006   pdn on e, samoyed on f: cross-TNC interop
+#
+# Send a KISS frame to one end of a pair and it comes out of the other.
+# Any mode in `pdn-soundmodem --help` works the same way; gfsk9600 is
+# net-sim's name for G3RUH 9600, which pdn calls fsk9600.
+mixer_mode: fm_capture
+capture_db: 6.0
+collision_mode: silence
+# No background noise here, deliberately. pdn-soundmodem with no radio
+# control cable judges "channel busy" from the audio, and an open-squelch
+# hiss that drops under a signal and comes back afterwards reads as busy
+# for a while (pdn's docs/dev/carrier-sense.md), and c4fsk's receiver
+# doesn't open on open-squelch noise yet (pdn issue #518). Add
+# default_noise_db: 45 to see both, the same as on air.
+
+nodes:
+  - id: a
+    ports:
+      - { id: fm, tnc: pdn, modem: { mode: qpsk3600 }, kiss_port: 8001 }
+  - id: b
+    ports:
+      - { id: fm, tnc: pdn, modem: { mode: qpsk3600 }, kiss_port: 8002 }
+  - id: c
+    ports:
+      - { id: fm, tnc: pdn, modem: { mode: c4fsk9600 }, kiss_port: 8003 }
+  - id: d
+    ports:
+      - { id: fm, tnc: pdn, modem: { mode: c4fsk9600 }, kiss_port: 8004 }
+  - id: e
+    ports:
+      - { id: vhf, tnc: pdn, modem: { mode: afsk1200 }, kiss_port: 8005 }
+  - id: f
+    ports:
+      - { id: vhf, tnc: samoyed, modem: { mode: afsk1200 }, kiss_port: 8006 }
+
+links:
+  - { from: a.fm, to: b.fm, loss_db: 10 }
+  - { from: b.fm, to: a.fm, loss_db: 10 }
+  - { from: c.fm, to: d.fm, loss_db: 10 }
+  - { from: d.fm, to: c.fm, loss_db: 10 }
+  - { from: e.vhf, to: f.vhf, loss_db: 10 }
+  - { from: f.vhf, to: e.vhf, loss_db: 10 }

@@ -68,6 +68,10 @@ const txSilenceWindow = 200 * time.Millisecond
 // keeps the same sim-time resolution.
 const txWatchdogTick = 50 * time.Millisecond
 
+// pdnWarmup is how long Start waits, feeding audio, before returning when
+// any port runs pdn-soundmodem. See Start.
+const pdnWarmup = time.Second
+
 // blockPeriod is the wall-clock duration of one audio block at
 // time_scale 1: BlockSamples / SampleRate = 10 ms. The rxFeeder and the
 // composite recorder pace themselves at scaled(blockPeriod).
@@ -89,6 +93,7 @@ func scaled(d time.Duration, timeScale float64) time.Duration {
 type Options struct {
 	SamoyedBin          string // path to samoyed-direwolf
 	DirewolfBin         string // path to direwolf
+	PdnBin              string // path to pdn-soundmodem
 	WorkDir             string // where temporary config files / FIFOs go
 	Verbose             bool   // log every routing decision
 	Logger              *slog.Logger
@@ -170,6 +175,7 @@ type Router struct {
 	txTrackers map[config.PortRef]*txTracker
 
 	cancel context.CancelFunc
+	done   <-chan struct{} // closed when the router's context ends
 	wg     sync.WaitGroup
 }
 
@@ -330,7 +336,7 @@ func Start(ctx context.Context, cfg *config.Config, opts Options) (*Router, erro
 
 	for _, n := range cfg.Nodes {
 		for _, p := range n.Ports {
-			if err := tnc.SupportedMode(p.Modem); err != nil {
+			if err := tnc.SupportedMode(tnc.Backend(p.TNC), p.Modem); err != nil {
 				return nil, fmt.Errorf("%s.%s: %w", n.ID, p.ID, err)
 			}
 		}
@@ -347,6 +353,7 @@ func Start(ctx context.Context, cfg *config.Config, opts Options) (*Router, erro
 		rxLinks:    map[config.PortRef][]*linkQueue{},
 		txTrackers: map[config.PortRef]*txTracker{},
 		cancel:     cancel,
+		done:       rctx.Done(),
 	}
 
 	for _, l := range cfg.Links {
@@ -383,14 +390,15 @@ func Start(ctx context.Context, cfg *config.Config, opts Options) (*Router, erro
 				RxAudioUDPPort: udpPort,
 				SamoyedBin:     opts.SamoyedBin,
 				DirewolfBin:    opts.DirewolfBin,
+				PdnBin:         opts.PdnBin,
 				WorkDir:        opts.WorkDir,
 			}
 			if opts.Observer != nil {
 				spec.StderrTap = opts.Observer.WriterFor(ref)
 			}
-			// direwolf doesn't use the per-port UDP port. Reserve it
-			// anyway so subsequent samoyed ports get the next one
-			// regardless of preceding direwolf ports — keeps the UDP
+			// direwolf and pdn don't use the per-port UDP port. Reserve
+			// it anyway so subsequent samoyed ports get the next one
+			// regardless of preceding direwolf/pdn ports; keeps the UDP
 			// port assignment stable as the topology is edited.
 			udpPort++
 
@@ -449,10 +457,24 @@ func Start(ctx context.Context, cfg *config.Config, opts Options) (*Router, erro
 			defer r.wg.Done()
 			err := child.Wait()
 			if rctx.Err() == nil {
-				r.logger.Error("samoyed child exited unexpectedly", "port", ref, "err", err)
+				r.logger.Error("TNC child exited unexpectedly", "port", ref, "err", err)
 				cancel()
 			}
 		}()
+	}
+
+	// pdn-soundmodem's receivers need a moment of audio after start-up
+	// before they decode reliably: a c4fsk9600 frame arriving 60 ms into
+	// the stream was missed, one arriving 160 ms in was not. Hold Start's
+	// return (and so "running") until the feeders have been going a while.
+	for _, child := range r.children {
+		if child.Spec().Backend == tnc.BackendPdn {
+			select {
+			case <-time.After(pdnWarmup):
+			case <-rctx.Done():
+			}
+			break
+		}
 	}
 
 	if opts.RecordDir != "" && opts.RecordOnStart {
@@ -463,6 +485,12 @@ func Start(ctx context.Context, cfg *config.Config, opts Options) (*Router, erro
 
 	return r, nil
 }
+
+// Done is closed when the router stops running: its parent context was
+// cancelled, Stop was called, or a TNC child exited. Callers should then
+// call Stop, which closes the children's audio I/O so the routing
+// goroutines can finish; Wait alone would block on their reads.
+func (r *Router) Done() <-chan struct{} { return r.done }
 
 // Stop terminates all children and waits for routing goroutines to exit.
 func (r *Router) Stop() error {

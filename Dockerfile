@@ -4,7 +4,8 @@
 # from this checkout.
 #
 # Runtime stage: a slim image carrying just the binaries, the
-# samoyed-direwolf runtime libraries (libportaudio2 et al.), and the
+# samoyed-direwolf runtime libraries (libportaudio2 et al.), direwolf and
+# pdn-soundmodem for the other two TNC backends, and the
 # default two-node network at /etc/sim/network.yaml. Entrypoint is
 # sim-web on :8080.
 #
@@ -66,11 +67,22 @@ RUN go build -ldflags="-s -w" -o /out/sim-router ./cmd/sim-router \
 # ---- runtime ------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 
+# pdn-soundmodem (the tnc: pdn backend) comes from the packet-net apt
+# repository. Empty PDN_VERSION takes the newest; set it (e.g. 0.80.0) to pin.
+ARG PDN_VERSION=
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libportaudio2 libhamlib4 libudev1 libavahi-client3 \
         libbsd0 libgps28 libasound2 libjack-jackd2-0 libpulse0 \
         direwolf \
-        ca-certificates \
+        ca-certificates curl gpg \
+    && curl -fsSL https://packet-net.github.io/apt/pubkey.asc \
+        | gpg --dearmor -o /usr/share/keyrings/packet-net.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/packet-net.gpg] https://packet-net.github.io/apt ./" \
+        > /etc/apt/sources.list.d/packet-net.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends "pdn-soundmodem${PDN_VERSION:+=$PDN_VERSION}" \
+    && apt-get purge -y --auto-remove curl gpg \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/* /var/log/*
 
 # binaries
