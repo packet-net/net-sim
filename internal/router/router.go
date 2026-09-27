@@ -1,28 +1,22 @@
-// Package router orchestrates the simulator: spawns samoyed children, owns
-// the topology, and routes audio between ports per the link table and
-// receiver-side mixer.
+// Package router orchestrates the simulator: spawns the TNC children, owns
+// the topology, gives each port an FM radio and carries the carriers
+// between them (see channel.go).
 //
 // Audio flow per port P:
 //
-//	     ┌─ KISS TCP ───────────────────────┐
-//	     │ (samoyed exposes; router doesn't │
-//	     │  touch KISS frames)              │
-//	     │                                  │
-//	stdin: ◄── rxFeeder ── mixer ── all S where link S→P
-//	     │                                  │
-//	     │                  fresh blocks ──►│
-//	     │                                  │
-//	udp out: ── txReader ── for each link P→D, push to D's bus
+//	TNC TX audio --txReader--> P's transmitter (FM modulation)
+//	    --> for each link P->D, the carrier is queued for D
+//	D's rxFeeder, every 10 ms: sum of the carriers reaching D at their
+//	    received levels, plus D's noise, through D's receiver --> D's TNC
 //
-// Each samoyed gets continuous PCM on stdin (silence-filled when no peer
-// is transmitting) so its demodulator never starves.
+// Each TNC gets continuous receive audio (hiss, with the squelch open)
+// so its demodulator never starves.
 //
-// samoyed only writes to its UDP output when actually keying. Importantly,
-// samoyed produces TX audio as fast as it can compute it (no pacing): a
-// 500 ms frame can land on UDP in a few wall-clock ms. We therefore queue
-// per-link blocks and the receiver-side rxFeeder drains them at exactly
-// SampleRate/BlockSamples Hz, so the audio reaches each samoyed at the
-// rate it expects to consume it.
+// TNCs only produce TX audio while keying, and produce it as fast as they
+// can compute it (no pacing): a 500 ms frame can arrive in a few wall-clock
+// ms. We therefore queue per-link blocks and each receiver's rxFeeder
+// drains them at exactly SampleRate/BlockSamples Hz, so the channel runs in
+// real time.
 package router
 
 import (

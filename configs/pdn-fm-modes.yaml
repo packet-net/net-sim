@@ -8,29 +8,28 @@
 # Send a KISS frame to one end of a pair and it comes out of the other.
 # Any mode in `pdn-soundmodem --help` works the same way; gfsk9600 is
 # net-sim's name for G3RUH 9600, which pdn calls fsk9600.
-mixer_mode: fm_capture
-capture_db: 6.0
-collision_mode: silence
-# No background noise here, deliberately. pdn-soundmodem with no radio
-# control cable judges "channel busy" from the audio, and an open-squelch
-# hiss that drops under a signal and comes back afterwards reads as busy
-# for a while (pdn's docs/dev/carrier-sense.md), and c4fsk's receiver
-# doesn't open on open-squelch noise yet (pdn issue #518). Add
-# default_noise_db: 45 to see both, the same as on air.
+# Each pair is on the radio its mode belongs on (pdn's mode table):
+# qpsk3600 is a 5 kHz-deviation mode, so a wide (25 kHz) channel;
+# c4fsk9600 is 2.5 kHz, narrow. Both run with the squelch closed (Tait's
+# "hard" preset): on an open-squelch receiver pdn's c4fsk receiver misses
+# frames (pdn #518) and its qpsk receiver loses some, because both look for
+# a rise in level at the start of a burst and open-squelch audio falls
+# instead (the hiss is louder than the signal). Remove the squelch to see
+# that. The afsk1200 pair runs open squelch, as packet stations usually do.
 
 nodes:
   - id: a
     ports:
-      - { id: fm, tnc: pdn, modem: { mode: qpsk3600 }, kiss_port: 8001 }
+      - { id: fm, tnc: pdn, modem: { mode: qpsk3600 }, kiss_port: 8001, radio: { channel: wide, squelch: hard } }
   - id: b
     ports:
-      - { id: fm, tnc: pdn, modem: { mode: qpsk3600 }, kiss_port: 8002 }
+      - { id: fm, tnc: pdn, modem: { mode: qpsk3600 }, kiss_port: 8002, radio: { channel: wide, squelch: hard } }
   - id: c
     ports:
-      - { id: fm, tnc: pdn, modem: { mode: c4fsk9600 }, kiss_port: 8003 }
+      - { id: fm, tnc: pdn, modem: { mode: c4fsk9600 }, kiss_port: 8003, radio: { squelch: hard } }
   - id: d
     ports:
-      - { id: fm, tnc: pdn, modem: { mode: c4fsk9600 }, kiss_port: 8004 }
+      - { id: fm, tnc: pdn, modem: { mode: c4fsk9600 }, kiss_port: 8004, radio: { squelch: hard } }
   - id: e
     ports:
       - { id: vhf, tnc: pdn, modem: { mode: afsk1200 }, kiss_port: 8005 }
@@ -39,9 +38,9 @@ nodes:
       - { id: vhf, tnc: samoyed, modem: { mode: afsk1200 }, kiss_port: 8006 }
 
 links:
-  - { from: a.fm, to: b.fm, loss_db: 10 }
-  - { from: b.fm, to: a.fm, loss_db: 10 }
-  - { from: c.fm, to: d.fm, loss_db: 10 }
-  - { from: d.fm, to: c.fm, loss_db: 10 }
-  - { from: e.vhf, to: f.vhf, loss_db: 10 }
-  - { from: f.vhf, to: e.vhf, loss_db: 10 }
+  - { from: a.fm, to: b.fm, path_loss_db: 120 }
+  - { from: b.fm, to: a.fm, path_loss_db: 120 }
+  - { from: c.fm, to: d.fm, path_loss_db: 120 }
+  - { from: d.fm, to: c.fm, path_loss_db: 120 }
+  - { from: e.vhf, to: f.vhf, path_loss_db: 120 }
+  - { from: f.vhf, to: e.vhf, path_loss_db: 120 }

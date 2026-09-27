@@ -1,17 +1,13 @@
 # Hidden-node demo, equal levels (mutual destruction).
 #
-# A↔B and B↔C are linked with the same loss. A↔C is *not* — A and C cannot
-# hear each other, so neither knows the other is keying. When both A and C
-# transmit overlapping frames, B sees them at equal RX level: capture
-# margin is 0 dB, well below the 6 dB threshold, so B's mixer falls into
-# the collision branch and decodes nothing.
+# A<->B and B<->C have the same path loss. A<->C is *not* linked: A and C
+# cannot hear each other, so neither knows the other is keying. When both
+# transmit overlapping frames, B receives two carriers at equal level;
+# neither captures its receiver, which turns out garble, and it decodes
+# nothing.
 #
 # Compare with hidden-node-capture.yaml: same topology, asymmetric loss,
 # A captures over C and its frames punch through.
-mixer_mode: fm_capture
-capture_db: 6.0
-collision_mode: silence
-
 nodes:
   - id: a
     ports:
@@ -31,9 +27,9 @@ nodes:
 
 links:
   # A ↔ B
-  - { from: a.vhf, to: b.vhf, loss_db: 0 }
-  - { from: b.vhf, to: a.vhf, loss_db: 0 }
+  - { from: a.vhf, to: b.vhf, path_loss_db: 120 }
+  - { from: b.vhf, to: a.vhf, path_loss_db: 120 }
   # B ↔ C
-  - { from: b.vhf, to: c.vhf, loss_db: 0 }
-  - { from: c.vhf, to: b.vhf, loss_db: 0 }
+  - { from: b.vhf, to: c.vhf, path_loss_db: 120 }
+  - { from: c.vhf, to: b.vhf, path_loss_db: 120 }
   # A and C deliberately *not* linked — they're hidden from each other.

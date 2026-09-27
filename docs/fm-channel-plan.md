@@ -1,6 +1,6 @@
 # Plan: a physical FM channel model, and a 48 kHz router
 
-Status: approved 2026-09-27, in progress on branch feat/fm-channel. Decisions are at the end.
+Status: built, 2026-09-27, on branch feat/fm-channel. This is the plan as approved; what was built, and how it measured up, is in [fm-channel.md](fm-channel.md). The decisions at the end changed some of it: the old model was replaced outright rather than kept behind a `channel_model` switch.
 
 ## Summary
 

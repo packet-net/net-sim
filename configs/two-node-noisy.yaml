@@ -1,28 +1,23 @@
-# Same as two-node.yaml but with deliberate path loss + channel noise.
-# Phase 4 acceptance: frame error rate climbs when SNR is reduced.
+# Two AFSK1200 stations right at the edge of range, to watch frames fail.
 #
-# loss_db has to be non-zero so the signal isn't clipping at full scale —
-# samoyed transmits at peak 32767, which saturates int16 output and is
-# essentially immune to additive noise (the bit decisions still work fine
-# even when sigma is high). 20 dB attenuation drops the signal RMS to a
-# level where the noise floor is meaningfully competing.
+# FM doesn't fade away gracefully: above its threshold the receiver's
+# output is clean, below it the discriminator collapses into clicks. With
+# the default radios (25 W, a Tait TM8100 on a 12.5 kHz channel via its data
+# taps, a residential site: a noise floor of about -120.8 dBm), direwolf at
+# 1200 baud measured, 12 frames per point:
 #
-# Empirical FER from this config (1200-baud AFSK, 20 frames, 0.4 s spacing):
-#   loss=20, noise=0   → 0%   (sanity check, no noise)
-#   loss=20, noise=20  → ~20% (degraded but mostly OK)
-#   loss=20, noise=18  → ~75% (badly degraded)
-#   loss=30, noise=24  → 100% (channel unusable)
+#   path_loss_db 156   12/12 frames  (carrier-to-noise about 8.8 dB)
+#   path_loss_db 157    9/12
+#   path_loss_db 157.5  6/12
+#   path_loss_db 158    2/12
+#   path_loss_db 159    0/12        (about 5.8 dB)
 #
-# This demo uses noise_db=20 so frames mostly get through but you can see
-# the FER move on each run. Tune for your point.
-mixer_mode: fm_capture
-capture_db: 6.0
-collision_mode: silence
-
+# This demo sits at 157.5, where about half get through. Move it a dB
+# either way to see how steep the edge is.
 nodes:
-  - { id: a, callsign: SIMA, ports: [{ id: vhf, modem: { mode: afsk1200 }, kiss_port: 8001 }] }
-  - { id: b, callsign: SIMB, ports: [{ id: vhf, modem: { mode: afsk1200 }, kiss_port: 8002 }] }
+  - { id: a, ports: [{ id: vhf, modem: { mode: afsk1200 }, kiss_port: 8001 }] }
+  - { id: b, ports: [{ id: vhf, modem: { mode: afsk1200 }, kiss_port: 8002 }] }
 
 links:
-  - { from: a.vhf, to: b.vhf, loss_db: 20, noise_db: 20 }
-  - { from: b.vhf, to: a.vhf, loss_db: 20, noise_db: 20 }
+  - { from: a.vhf, to: b.vhf, path_loss_db: 157.5 }
+  - { from: b.vhf, to: a.vhf, path_loss_db: 157.5 }

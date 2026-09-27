@@ -2,6 +2,7 @@ package config
 
 import (
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -460,6 +461,25 @@ links: []
 `
 		if _, err := Parse(strings.NewReader(yml)); err == nil {
 			t.Errorf("radio %s: accepted, want an error", radio)
+		}
+	}
+}
+
+// Every config shipped in the repository must load: a demo that the
+// strict parser refuses is a broken demo.
+func TestShippedConfigsLoad(t *testing.T) {
+	files, _ := filepath.Glob("../../configs/*.yaml")
+	more, _ := filepath.Glob("../../examples/*.yaml")
+	files = append(files, more...)
+	if len(files) == 0 {
+		t.Fatal("no shipped configs found")
+	}
+	for _, f := range files {
+		if filepath.Base(f) == "docker-compose.yml" {
+			continue
+		}
+		if _, err := Load(f); err != nil {
+			t.Errorf("%s: %v", f, err)
 		}
 	}
 }

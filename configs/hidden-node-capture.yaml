@@ -1,17 +1,13 @@
 # Hidden-node demo, asymmetric levels (A captures).
 #
-# Same topology as hidden-node.yaml — A and C cannot hear each other, both
-# are heard by B — but A is much louder at B than C is. When both transmit
-# at the same time, B's mixer sees a 12 dB margin between the two signals;
-# 12 dB ≥ the 6 dB capture threshold, so A "captures" the demodulator and
-# its frames decode cleanly. C is suppressed despite transmitting.
+# Same topology as hidden-node.yaml (A and C cannot hear each other, both
+# are heard by B) but A arrives at B 20 dB stronger than C. When both
+# transmit at once, A's carrier captures B's limiter and discriminator and
+# its frames decode; C is suppressed despite transmitting. Nothing in the
+# simulator decides this: it is what an FM receiver does with two carriers.
 #
 # This is the configuration-driven proof that the FM capture effect is
 # what makes packet usable on shared-channel VHF in the real world.
-mixer_mode: fm_capture
-capture_db: 6.0
-collision_mode: silence
-
 nodes:
   - id: a
     ports:
@@ -30,10 +26,10 @@ nodes:
         kiss_port: 8003
 
 links:
-  # A ↔ B at -3 dB
-  - { from: a.vhf, to: b.vhf, loss_db: 3 }
-  - { from: b.vhf, to: a.vhf, loss_db: 3 }
-  # B ↔ C at -15 dB
-  - { from: b.vhf, to: c.vhf, loss_db: 15 }
-  - { from: c.vhf, to: b.vhf, loss_db: 15 }
+  # A <-> B, a strong path
+  - { from: a.vhf, to: b.vhf, path_loss_db: 125 }
+  - { from: b.vhf, to: a.vhf, path_loss_db: 125 }
+  # B <-> C, 20 dB weaker
+  - { from: b.vhf, to: c.vhf, path_loss_db: 145 }
+  - { from: c.vhf, to: b.vhf, path_loss_db: 145 }
   # A — C: hidden from each other.

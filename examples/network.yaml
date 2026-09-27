@@ -1,10 +1,6 @@
 # Example three-node network for the docker-compose fixture.
 # Replace freely. KISS ports here land on the host because docker-compose.yml
 # uses network_mode: host.
-mixer_mode: fm_capture
-capture_db: 6.0
-collision_mode: silence
-
 nodes:
   - id: a
     ports:
@@ -23,7 +19,7 @@ nodes:
         kiss_port: 8003
 
 links:
-  - { from: a.vhf, to: b.vhf, loss_db: 0 }
-  - { from: b.vhf, to: a.vhf, loss_db: 0 }
-  - { from: b.vhf, to: c.vhf, loss_db: 0 }
-  - { from: c.vhf, to: b.vhf, loss_db: 0 }
+  - { from: a.vhf, to: b.vhf, path_loss_db: 120 }
+  - { from: b.vhf, to: a.vhf, path_loss_db: 120 }
+  - { from: b.vhf, to: c.vhf, path_loss_db: 120 }
+  - { from: c.vhf, to: b.vhf, path_loss_db: 120 }

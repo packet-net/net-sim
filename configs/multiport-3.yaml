@@ -9,10 +9,6 @@
 # test are the *port multiplicity*, not the modem variety. Swap to
 # `gfsk9600` on `middle.uhf` and the matching `f.vhf` once you want to
 # exercise mixed-modem.
-mixer_mode: fm_capture
-capture_db: 6.0
-collision_mode: silence
-
 nodes:
   - id: a
     ports:
@@ -37,11 +33,11 @@ nodes:
 
 links:
   # a ↔ middle.vhf
-  - { from: a.vhf, to: middle.vhf, loss_db: 0 }
-  - { from: middle.vhf, to: a.vhf, loss_db: 0 }
+  - { from: a.vhf, to: middle.vhf, path_loss_db: 120 }
+  - { from: middle.vhf, to: a.vhf, path_loss_db: 120 }
   # b ↔ middle.uhf
-  - { from: b.vhf, to: middle.uhf, loss_db: 0 }
-  - { from: middle.uhf, to: b.vhf, loss_db: 0 }
+  - { from: b.vhf, to: middle.uhf, path_loss_db: 120 }
+  - { from: middle.uhf, to: b.vhf, path_loss_db: 120 }
   # No cross-coupling between middle.vhf and middle.uhf — different
   # frequencies, different radios, independent paths. The router enforces
   # this by simply not having a link between them.

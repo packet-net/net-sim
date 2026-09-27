@@ -1,9 +1,5 @@
 # Smoke-test config: two nodes, one port each, bidirectional AFSK1200 link.
 # Send a KISS frame to A's KISS port (8001) and it comes out of B's (8002).
-mixer_mode: fm_capture
-capture_db: 6.0
-collision_mode: silence
-
 nodes:
   - id: a
     ports:
@@ -17,5 +13,5 @@ nodes:
         kiss_port: 8002
 
 links:
-  - { from: a.vhf, to: b.vhf, loss_db: 0 }
-  - { from: b.vhf, to: a.vhf, loss_db: 0 }
+  - { from: a.vhf, to: b.vhf, path_loss_db: 120 }
+  - { from: b.vhf, to: a.vhf, path_loss_db: 120 }

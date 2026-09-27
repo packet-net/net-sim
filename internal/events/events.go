@@ -26,9 +26,10 @@ const (
 	// The port is "unkeyed."
 	TXEnd Type = "tx_end"
 
-	// RXDecision fires per receiving port when its mixer verdict changes
-	// — either the decision flipped (silence ↔ single ↔ capture ↔
-	// collision) or the set of contributing source ports changed.
+	// RXDecision fires per receiving port when what is on its channel
+	// changes: the decision flipped (silence, single, capture or
+	// collision: a label for the RF situation, see router.decisionFor) or
+	// the set of transmitters reaching it changed.
 	RXDecision Type = "rx_decision"
 )
 
