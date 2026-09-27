@@ -12,30 +12,33 @@ import (
 
 // Radio is a port's FM transceiver. Every field is optional; the defaults
 // are a Tait TM8100/TM8200 from its datasheets (see internal/fm and
-// docs/fm-channel.md).
+// docs/fm-channel.md). Fields where zero is a meaningful setting (flat
+// emphasis, no limiter, a 0 dBFS receive level) are pointers, so an
+// explicit zero isn't mistaken for "use the default".
 type Radio struct {
-	Channel          string  `yaml:"channel,omitempty"` // narrow | mid | wide
-	Path             string  `yaml:"path,omitempty"`    // data | voice
-	DeviationHz      float64 `yaml:"deviation_hz,omitempty"`
-	LimitHz          float64 `yaml:"limit_hz,omitempty"`
-	IFBandwidthHz    float64 `yaml:"if_bandwidth_hz,omitempty"`
-	AudioLowHz       float64 `yaml:"audio_low_hz,omitempty"`
-	AudioHighHz      float64 `yaml:"audio_high_hz,omitempty"`
-	EmphasisUs       float64 `yaml:"emphasis_us,omitempty"`
-	TxPowerW         float64 `yaml:"tx_power_w,omitempty"`
-	AntennaGainDBi   float64 `yaml:"antenna_gain_dbi,omitempty"`
-	FeederLossDB     float64 `yaml:"feeder_loss_db,omitempty"`
-	NoiseFigureDB    float64 `yaml:"noise_figure_db,omitempty"`
-	SiteNoise        string  `yaml:"site_noise,omitempty"` // none | quiet_rural | rural | residential | business
-	FrequencyErrorHz float64 `yaml:"frequency_error_hz,omitempty"`
-	RxLevelDBFS      float64 `yaml:"rx_level_dbfs,omitempty"`
-	HumNoiseDB       float64 `yaml:"hum_noise_db,omitempty"`
-	Squelch          Squelch `yaml:"squelch,omitempty"`
+	Channel          string   `yaml:"channel,omitempty"` // narrow | mid | wide
+	Path             string   `yaml:"path,omitempty"`    // data | voice
+	DeviationHz      float64  `yaml:"deviation_hz,omitempty"`
+	LimitHz          *float64 `yaml:"limit_hz,omitempty"` // 0 = no limiter
+	IFBandwidthHz    float64  `yaml:"if_bandwidth_hz,omitempty"`
+	AudioLowHz       float64  `yaml:"audio_low_hz,omitempty"`
+	AudioHighHz      float64  `yaml:"audio_high_hz,omitempty"`
+	EmphasisUs       *float64 `yaml:"emphasis_us,omitempty"` // 0 = flat
+	TxPowerW         *float64 `yaml:"tx_power_w,omitempty"`
+	AntennaGainDBi   float64  `yaml:"antenna_gain_dbi,omitempty"`
+	FeederLossDB     float64  `yaml:"feeder_loss_db,omitempty"`
+	NoiseFigureDB    *float64 `yaml:"noise_figure_db,omitempty"`
+	SiteNoise        string   `yaml:"site_noise,omitempty"` // none | quiet_rural | rural | residential | business
+	FrequencyErrorHz float64  `yaml:"frequency_error_hz,omitempty"`
+	RxLevelDBFS      *float64 `yaml:"rx_level_dbfs,omitempty"`
+	HumNoiseDB       *float64 `yaml:"hum_noise_db,omitempty"`
+	Squelch          Squelch  `yaml:"squelch,omitempty"`
 }
 
 // Squelch is written either as a preset name (open, country, city, hard)
 // or as a mapping: { preset: city, open_ms: 30 } or
 // { threshold_dbm: -110, hysteresis_db: 6, open_ms: 20, close_ms: 100 }.
+// With a preset, hysteresis_db overrides the preset's.
 type Squelch struct {
 	Preset       string  `yaml:"preset,omitempty"`
 	ThresholdDBm float64 `yaml:"threshold_dbm,omitempty"`
@@ -52,8 +55,7 @@ func (s *Squelch) UnmarshalYAML(n *yaml.Node) error {
 	}
 	type plain Squelch
 	var p plain
-	dec := func(v any) error { return n.Decode(v) }
-	if err := dec(&p); err != nil {
+	if err := n.Decode(&p); err != nil {
 		return err
 	}
 	*s = Squelch(p)
@@ -76,12 +78,18 @@ func (r Radio) validate() error {
 	default:
 		return fmt.Errorf("site_noise %q (none, quiet_rural, rural, residential or business)", r.SiteNoise)
 	}
+	deref := func(p *float64) float64 {
+		if p == nil {
+			return 0
+		}
+		return *p
+	}
 	for name, v := range map[string]float64{
-		"deviation_hz": r.DeviationHz, "limit_hz": r.LimitHz, "if_bandwidth_hz": r.IFBandwidthHz,
-		"audio_low_hz": r.AudioLowHz, "audio_high_hz": r.AudioHighHz, "emphasis_us": r.EmphasisUs,
-		"tx_power_w": r.TxPowerW, "antenna_gain_dbi": r.AntennaGainDBi, "feeder_loss_db": r.FeederLossDB,
-		"noise_figure_db": r.NoiseFigureDB, "frequency_error_hz": r.FrequencyErrorHz,
-		"rx_level_dbfs": r.RxLevelDBFS, "hum_noise_db": r.HumNoiseDB,
+		"deviation_hz": r.DeviationHz, "limit_hz": deref(r.LimitHz), "if_bandwidth_hz": r.IFBandwidthHz,
+		"audio_low_hz": r.AudioLowHz, "audio_high_hz": r.AudioHighHz, "emphasis_us": deref(r.EmphasisUs),
+		"tx_power_w": deref(r.TxPowerW), "antenna_gain_dbi": r.AntennaGainDBi, "feeder_loss_db": r.FeederLossDB,
+		"noise_figure_db": deref(r.NoiseFigureDB), "frequency_error_hz": r.FrequencyErrorHz,
+		"rx_level_dbfs": deref(r.RxLevelDBFS), "hum_noise_db": deref(r.HumNoiseDB),
 		"squelch threshold_dbm": r.Squelch.ThresholdDBm, "squelch hysteresis_db": r.Squelch.HysteresisDB,
 		"squelch open_ms": r.Squelch.OpenMS, "squelch close_ms": r.Squelch.CloseMS,
 	} {
@@ -90,35 +98,52 @@ func (r Radio) validate() error {
 		}
 	}
 	for name, v := range map[string]float64{
-		"deviation_hz": r.DeviationHz, "limit_hz": r.LimitHz, "if_bandwidth_hz": r.IFBandwidthHz,
-		"audio_low_hz": r.AudioLowHz, "audio_high_hz": r.AudioHighHz, "emphasis_us": r.EmphasisUs,
-		"tx_power_w": r.TxPowerW, "feeder_loss_db": r.FeederLossDB, "noise_figure_db": r.NoiseFigureDB,
-		"hum_noise_db": r.HumNoiseDB, "squelch hysteresis_db": r.Squelch.HysteresisDB,
+		"deviation_hz": r.DeviationHz, "limit_hz": deref(r.LimitHz), "if_bandwidth_hz": r.IFBandwidthHz,
+		"audio_low_hz": r.AudioLowHz, "audio_high_hz": r.AudioHighHz, "emphasis_us": deref(r.EmphasisUs),
+		"feeder_loss_db": r.FeederLossDB, "noise_figure_db": deref(r.NoiseFigureDB),
+		"squelch hysteresis_db": r.Squelch.HysteresisDB,
 		"squelch open_ms": r.Squelch.OpenMS, "squelch close_ms": r.Squelch.CloseMS,
 	} {
 		if v < 0 {
 			return fmt.Errorf("%s must not be negative", name)
 		}
 	}
-	if r.DeviationHz > 20000 || r.IFBandwidthHz > 40000 || r.AudioHighHz > 20000 {
-		return errors.New("deviation_hz, if_bandwidth_hz or audio_high_hz is beyond what a 48 kHz simulator can carry")
+	if r.TxPowerW != nil && *r.TxPowerW <= 0 {
+		return errors.New("tx_power_w must be above 0")
 	}
-	if r.AudioHighHz != 0 && r.AudioLowHz >= r.AudioHighHz {
-		return errors.New("audio_low_hz must be below audio_high_hz")
+	if r.HumNoiseDB != nil && *r.HumNoiseDB <= 0 {
+		return errors.New("hum_noise_db must be above 0 (dB below a 60 % deviation tone; a large value such as 120 all but removes it)")
 	}
-	if r.RxLevelDBFS > 0 {
+	if r.RxLevelDBFS != nil && *r.RxLevelDBFS > 0 {
 		return errors.New("rx_level_dbfs must be at or below 0")
 	}
-	if r.Squelch.Preset != "" && r.Squelch.ThresholdDBm != 0 {
+	sq := r.Squelch
+	if sq.Preset != "" && sq.ThresholdDBm != 0 {
 		return errors.New("squelch takes a preset or a threshold_dbm, not both")
 	}
-	if r.Squelch.Preset != "" {
-		if _, err := fm.SquelchPreset(r.Squelch.Preset); err != nil {
+	if sq.Preset != "" {
+		if _, err := fm.SquelchPreset(sq.Preset); err != nil {
 			return err
 		}
 	}
-	if r.Squelch.ThresholdDBm > 0 {
+	if sq.ThresholdDBm > 0 {
 		return errors.New("squelch threshold_dbm must be negative (dBm)")
+	}
+	if (sq.Preset == "" || sq.Preset == "open") && sq.ThresholdDBm == 0 &&
+		(sq.OpenMS != 0 || sq.CloseMS != 0 || sq.HysteresisDB != 0) {
+		return errors.New("squelch open_ms, close_ms and hysteresis_db need a preset (country, city, hard) or a threshold_dbm; an open squelch has none")
+	}
+
+	// Check what the defaults fill in, not just what was written.
+	f := r.FM()
+	if f.DeviationHz > 20000 || f.IFBandwidthHz > 40000 || f.AudioHighHz > 20000 {
+		return errors.New("deviation_hz, if_bandwidth_hz or audio_high_hz is beyond what a 48 kHz simulator can carry")
+	}
+	if f.AudioLowHz >= f.AudioHighHz {
+		return fmt.Errorf("the audio passband is empty: audio_low_hz %g is not below audio_high_hz %g", f.AudioLowHz, f.AudioHighHz)
+	}
+	if math.Abs(f.FrequencyErrorHz) > f.IFBandwidthHz/2 {
+		return fmt.Errorf("frequency_error_hz %g puts the radio outside its own %g Hz channel filter", f.FrequencyErrorHz, f.IFBandwidthHz)
 	}
 	return nil
 }
@@ -127,14 +152,10 @@ func (r Radio) validate() error {
 func (r Radio) FM() fm.Radio {
 	out := fm.Radio{
 		Channel: fm.Channel(r.Channel), Path: fm.Path(r.Path),
-		DeviationHz: r.DeviationHz, LimitHz: r.LimitHz, IFBandwidthHz: r.IFBandwidthHz,
-		AudioLowHz: r.AudioLowHz, AudioHighHz: r.AudioHighHz, EmphasisUs: r.EmphasisUs,
+		DeviationHz: r.DeviationHz, IFBandwidthHz: r.IFBandwidthHz,
+		AudioLowHz: r.AudioLowHz, AudioHighHz: r.AudioHighHz,
 		AntennaGainDBi: r.AntennaGainDBi, FeederLossDB: r.FeederLossDB,
-		NoiseFigureDB: r.NoiseFigureDB, Site: fm.Site(r.SiteNoise),
-		FrequencyErrorHz: r.FrequencyErrorHz, RxLevelDBFS: r.RxLevelDBFS, HumNoiseDB: r.HumNoiseDB,
-	}
-	if r.TxPowerW > 0 {
-		out.TxPowerDBm = 10 * math.Log10(r.TxPowerW*1000)
+		Site: fm.Site(r.SiteNoise), FrequencyErrorHz: r.FrequencyErrorHz,
 	}
 	sq := r.Squelch
 	switch {
@@ -142,7 +163,32 @@ func (r Radio) FM() fm.Radio {
 		out.Squelch = fm.Squelch{ThresholdDBm: sq.ThresholdDBm, HysteresisDB: sq.HysteresisDB}
 	default:
 		out.Squelch, _ = fm.SquelchPreset(sq.Preset)
+		if sq.HysteresisDB != 0 && !out.Squelch.Open {
+			out.Squelch.HysteresisDB = sq.HysteresisDB
+		}
 	}
 	out.Squelch.OpenMS, out.Squelch.CloseMS = sq.OpenMS, sq.CloseMS
-	return out.Default()
+	out = out.Default()
+
+	// Explicit values where zero means something are applied after the
+	// defaults, so they aren't replaced by them.
+	if r.LimitHz != nil {
+		out.LimitHz = *r.LimitHz
+	}
+	if r.EmphasisUs != nil {
+		out.EmphasisUs = *r.EmphasisUs
+	}
+	if r.TxPowerW != nil {
+		out.TxPowerDBm = 10 * math.Log10(*r.TxPowerW*1000)
+	}
+	if r.NoiseFigureDB != nil {
+		out.NoiseFigureDB = *r.NoiseFigureDB
+	}
+	if r.RxLevelDBFS != nil {
+		out.RxLevelDBFS = *r.RxLevelDBFS
+	}
+	if r.HumNoiseDB != nil {
+		out.HumNoiseDB = *r.HumNoiseDB
+	}
+	return out
 }

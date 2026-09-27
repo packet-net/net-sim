@@ -51,6 +51,15 @@ func NewTransmitter(p TxPath, audioRate, factor int) *Transmitter {
 // Factor is the IF oversampling factor.
 func (t *Transmitter) Factor() int { return t.factor }
 
+// Reset clears the transmitter's filter state, so the next audio starts a
+// new transmission with nothing of the last one in the filters. The
+// carrier phase carries on.
+func (t *Transmitter) Reset() {
+	t.prevIn = 0
+	t.band.reset()
+	t.interp.reset()
+}
+
 // Process modulates audio (full scale +/-1) and appends
 // len(audio)*Factor carrier samples to out.
 func (t *Transmitter) Process(audio []float32, out []complex128) []complex128 {

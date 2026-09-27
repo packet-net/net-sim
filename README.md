@@ -286,17 +286,20 @@ TM8100/TM8200 from its datasheets):
 | `site_noise` | `residential` | Man-made noise at the site (ITU-R P.372): `none`, `quiet_rural`, `rural`, `residential`, `business` |
 | `frequency_error_hz` | 0 | This radio's offset from the channel; Tait's spec is 1.5 ppm (about 220 Hz on 2 m) |
 | `rx_level_dbfs` | -18 | Receive audio level of a signal at rated deviation; the default puts open-squelch hiss at about -16 dBFS, as measured on a real radio |
-| `hum_noise_db` | 42 / 45.5 / 47.5 | Receiver hum and noise floor, from Tait's measured figures |
-| `squelch` | open | `open`, a Tait preset (`country` -115, `city` -113, `hard` -107 dBm), or `{ threshold_dbm, hysteresis_db, open_ms, close_ms }` |
-| `if_bandwidth_hz`, `audio_low_hz`, `audio_high_hz`, `emphasis_us` | from `channel` and `path` | Override the receive filter and audio path |
+| `hum_noise_db` | 42 / 45.5 / 47.5 | Receiver hum and noise floor, from Tait's measured figures; a large value such as 120 all but removes it |
+| `squelch` | open | `open`, a Tait preset (`country` -115, `city` -113, `hard` -107 dBm), `{ preset, hysteresis_db, open_ms, close_ms }`, or `{ threshold_dbm, hysteresis_db, open_ms, close_ms }` |
+| `if_bandwidth_hz`, `audio_low_hz`, `audio_high_hz`, `emphasis_us` | from `channel` and `path` | Override the receive filter and audio path; `emphasis_us: 0` is flat |
 
 Other things the radios do: a transmitting radio's own receiver is muted
 (half duplex); with the squelch open a receiver always hears hiss, louder
 than any data signal, which drops away when a carrier arrives; and a
 signal-strength squelch compares total received power (carriers plus
-noise) with its threshold, so a preset whose closing point sits under the
-site's noise floor opens on a signal and then never closes, as it wouldn't
-on a real radio.
+noise) with its threshold, as a real radio's RSSI does. A squelch whose
+closing point (threshold minus hysteresis) sits under the receiver's noise
+floor would open on the first signal and never close again, so it is
+refused at start-up with the numbers. That rules out `country` and `city`
+at the default residential site on 2 m; `hard` works anywhere, and the
+other two work at a `rural` site.
 
 Configs from before the FM channel model used `loss_db`, `noise_db`,
 `default_noise_db`, `capture_db`, `collision_mode`, `mixer_mode` and

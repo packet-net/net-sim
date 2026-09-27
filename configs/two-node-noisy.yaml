@@ -9,7 +9,7 @@
 #   path_loss_db 156   12/12 frames  (carrier-to-noise about 8.8 dB)
 #   path_loss_db 157    9/12
 #   path_loss_db 157.5  6/12
-#   path_loss_db 158    2/12
+#   path_loss_db 158    2 or 3/12 (two runs)
 #   path_loss_db 159    0/12        (about 5.8 dB)
 #
 # This demo sits at 157.5, where about half get through. Move it a dB

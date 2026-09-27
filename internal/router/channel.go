@@ -116,7 +116,7 @@ func (st *station) modulate(blk audio.Block, period time.Duration) []complex128 
 			break
 		}
 	}
-	return st.tx.Process(samples, nil)
+	return st.tx.Process(samples, make([]complex128, 0, len(samples)*st.tx.Factor()))
 }
 
 // heard is one carrier reaching a receiver this block.
